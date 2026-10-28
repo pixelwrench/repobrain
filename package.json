@@ -11,7 +11,8 @@
     "dist",
     ".claude-plugin",
     "hooks",
-    "commands"
+    "commands",
+    "bin"
   ],
   "os": [
     "darwin",
