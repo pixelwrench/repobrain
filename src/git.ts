@@ -56,10 +56,10 @@ export function resolveCommit(repo: string, rev: string): string | null {
 
 /**
  * `git fetch origin`, never prompting. ssh runs in batch mode (no password or host-key prompts),
- * unless the user set their own ssh command (GIT_SSH_COMMAND or core.sshCommand), which is kept as is.
+ * unless the user set their own ssh command (GIT_SSH_COMMAND, GIT_SSH or core.sshCommand), which is kept as is.
  */
 export function fetchQuietly(repo: string): boolean {
-  const ownSsh = process.env.GIT_SSH_COMMAND || tryGit(repo, ["config", "--get", "core.sshCommand"]);
+  const ownSsh = process.env.GIT_SSH_COMMAND || process.env.GIT_SSH || tryGit(repo, ["config", "--get", "core.sshCommand"]);
   const batch = ownSsh ? [] : ["-c", "core.sshCommand=ssh -o BatchMode=yes"];
   const args = [...batch, "fetch", "--quiet", "--no-recurse-submodules", "--no-auto-gc", "origin"];
   return tryGit(repo, args, { timeoutMs: 30_000 }) !== null;

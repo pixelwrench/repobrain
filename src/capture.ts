@@ -45,9 +45,10 @@ export interface CaptureReport {
 /**
  * `.codebrain/ignore` as git pathspec globs. A leading `/` (gitignore's "from the root") is
  * stripped, since pathspecs are already relative to the root. Lines git would reject or read as
- * something else (`!` negation, `:` pathspec magic) are dropped, each reported through `drop`.
+ * something else are dropped, each reported through `drop`: `!` negation, `:` pathspec magic,
+ * any `..` segment, and anything else git refuses as an exclude pathspec (checked once per run).
  */
-function readIgnore(repoPath: string, drop: (line: string) => void): string[] {
+function readIgnore(repoPath: string, drop: (line: string, why: string) => void): string[] {
   let text: string;
   try {
     text = fs.readFileSync(path.join(repoPath, ".codebrain", "ignore"), "utf8");
@@ -58,13 +59,41 @@ function readIgnore(repoPath: string, drop: (line: string) => void): string[] {
     const line = raw.trim();
     if (!line || line.startsWith("#")) return [];
     if (line.startsWith("!") || line.startsWith(":")) {
-      drop(line);
+      drop(line, "negation and pathspec magic aren't supported");
       return [];
     }
     const glob = line.replace(/^\/+/, "");
-    return glob ? [glob] : [];
+    if (!glob) return [];
+    if (glob.split("/").includes("..")) {
+      drop(line, "a .. segment would reach outside the repository");
+      return [];
+    }
+    const problem = pathspecProblem(repoPath, glob);
+    if (problem !== null) {
+      drop(line, `git rejects it: ${problem}`);
+      return [];
+    }
+    return [glob];
   });
 }
+
+/** Paired with an exclude so ls-files has a positive pathspec that matches nothing, and prints nothing. */
+const NO_MATCH = ":(literal).codebrain/no-such-file-pathspec-check";
+
+/** Why git rejects `glob` as an exclude pathspec, or null when it takes it. */
+function pathspecProblem(repoPath: string, glob: string): string | null {
+  try {
+    git(repoPath, ["ls-files", "--", NO_MATCH, `:(exclude,glob)${glob}`], { timeoutMs: 5_000 });
+    return null;
+  } catch (e) {
+    const err = e as { stderr?: unknown };
+    const detail = typeof err.stderr === "string" && err.stderr.trim() ? err.stderr.trim() : message(e);
+    return detail.split("\n")[0]!.slice(0, 200);
+  }
+}
+
+/** git refused a pathspec: a problem with the excludes, so every merge would hit it, not just this one. */
+const PATHSPEC_ERROR = /\bpathspec\b|outside repository/i;
 
 /** The object id at `rev:path`, or null when the path is missing there. */
 function objectId(repo: string, rev: string, p: string): string | null {
@@ -215,7 +244,7 @@ async function captureMerges(
   // Old state files have no processed list: fall back to merges that have card files.
   const done = new Set(state.processed ?? listCards(key).map((c) => c.merge));
   state.processed ??= [];
-  const excludes = [...DEFAULT_EXCLUDES, ...readIgnore(repo.path, (line) => appendLog(key, `ignore line dropped: ${JSON.stringify(line)} (negation and pathspec magic aren't supported)`))];
+  const excludes = [...DEFAULT_EXCLUDES, ...readIgnore(repo.path, (line, why) => appendLog(key, `ignore line dropped: ${JSON.stringify(line)} (${why})`))];
   let commits;
   try {
     commits = firstParentCommits(repo.path, from, head, from ? undefined : opts.since).slice(0, opts.maxMerges ?? DEFAULT_MAX_MERGES);
@@ -251,6 +280,11 @@ async function captureMerges(
       raw = commitDiff(repo.path, commit.sha, excludes, maxDiffBytes);
     } catch (e) {
       const msg = `git: ${message(e)}`;
+      if (PATHSPEC_ERROR.test(message(e))) {
+        // Not this merge's fault: striking would skip every merge in turn, so stop and keep the error visible.
+        appendLog(key, `${commit.sha} not drafted, git rejected a pathspec (check .codebrain/ignore): ${msg}`);
+        return fail(msg);
+      }
       state.lastError = { at: now().toISOString(), message: msg.slice(0, 500) };
       const stopped = strike(msg);
       if (stopped) return stopped;

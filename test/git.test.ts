@@ -127,7 +127,7 @@ describe("git helpers", () => {
     let repo: string;
     let stub: string;
     let record: string;
-    const saved = { PATH: process.env.PATH, GIT_SSH_COMMAND: process.env.GIT_SSH_COMMAND };
+    const saved = { PATH: process.env.PATH, GIT_SSH_COMMAND: process.env.GIT_SSH_COMMAND, GIT_SSH: process.env.GIT_SSH };
     beforeEach(() => {
       repo = makeRepo();
       commit(repo, { "a.txt": "a\n" }, "first");
@@ -139,11 +139,14 @@ describe("git helpers", () => {
       }
       process.env.PATH = `${stub}${path.delimiter}${saved.PATH}`;
       delete process.env.GIT_SSH_COMMAND;
+      delete process.env.GIT_SSH;
     });
     afterEach(() => {
       process.env.PATH = saved.PATH;
-      if (saved.GIT_SSH_COMMAND === undefined) delete process.env.GIT_SSH_COMMAND;
-      else process.env.GIT_SSH_COMMAND = saved.GIT_SSH_COMMAND;
+      for (const k of ["GIT_SSH_COMMAND", "GIT_SSH"] as const) {
+        if (saved[k] === undefined) delete process.env[k];
+        else process.env[k] = saved[k];
+      }
     });
 
     it("runs ssh in batch mode by default", () => {
@@ -156,6 +159,14 @@ describe("git helpers", () => {
       fetchQuietly(repo);
       const calls = fs.readFileSync(record, "utf8");
       expect(calls).toMatch(/^myssh -v /m);
+      expect(calls).not.toContain("BatchMode");
+    });
+
+    it("keeps the user's GIT_SSH", () => {
+      process.env.GIT_SSH = path.join(stub, "myssh");
+      fetchQuietly(repo);
+      const calls = fs.readFileSync(record, "utf8");
+      expect(calls).toMatch(/^myssh /m);
       expect(calls).not.toContain("BatchMode");
     });
 

@@ -16,6 +16,7 @@ const hooks = vi.hoisted(() => ({
   commitDiffError: null as null | Error,
   firstParentError: null as null | Error,
   listCardsError: null as null | Error,
+  rejectPathspec: null as null | string,
 }));
 
 vi.mock("../src/anchor.js", async (importOriginal) => {
@@ -37,6 +38,13 @@ vi.mock("../src/git.js", async (importOriginal) => {
     fileAt: (repo: string, rev: string, p: string) => {
       hooks.fileReads.push(p);
       return real.fileAt(repo, rev, p);
+    },
+    git: (...args: Parameters<typeof real.git>) => {
+      const [, gitArgs] = args;
+      if (hooks.rejectPathspec && gitArgs[0] === "ls-files" && gitArgs.some((a) => a.includes(hooks.rejectPathspec!))) {
+        throw new Error(`fatal: Unimplemented pathspec magic in ${hooks.rejectPathspec}`);
+      }
+      return real.git(...args);
     },
     commitDiff: (...args: Parameters<typeof real.commitDiff>) => {
       if (hooks.commitDiffError) throw hooks.commitDiffError;
@@ -115,6 +123,7 @@ describe("runCapture", () => {
     hooks.commitDiffError = null;
     hooks.firstParentError = null;
     hooks.listCardsError = null;
+    hooks.rejectPathspec = null;
   });
 
   /** Captures one merge of src/ref.ts and keeps its cards. */
@@ -548,18 +557,48 @@ describe("runCapture", () => {
     expect(log()).toContain('ignore line dropped: ":(top)other"');
   });
 
+  it("drops ignore lines with a .. segment or that git rejects, and still drafts", async () => {
+    await runCapture(key, opts(fake()));
+    fs.mkdirSync(path.join(repo, ".codebrain"), { recursive: true });
+    const ignore = "../outside/**\nsrc/../../x\nweird/**\nsecrets/**\n";
+    commit(repo, { "src/ref.ts": FILE, "secrets/notes.txt": "private\n", ".codebrain/ignore": ignore }, "feat");
+    hooks.rejectPathspec = "weird/**";
+    let stdin = "";
+    const report = await runCapture(key, opts(async (_p, s) => ((stdin = s), JSON.stringify([cardFor("src/ref.ts")]))));
+    expect(report).toMatchObject({ status: "done", cardsWritten: 1 });
+    expect(stdin).not.toContain("secrets/notes.txt");
+    expect(log()).toContain('ignore line dropped: "../outside/**" (a .. segment');
+    expect(log()).toContain('ignore line dropped: "src/../../x" (a .. segment');
+    expect(log()).toContain('ignore line dropped: "weird/**" (git rejects it');
+  });
+
+  it("treats a pathspec error as a repo-wide failure: no strike, and the error stays visible", async () => {
+    await runCapture(key, opts(fake()));
+    commit(repo, { "src/ref.ts": FILE }, "feat: referral codes");
+    const before = readState(key).lastSha;
+    hooks.commitDiffError = new Error("fatal: :(exclude,glob)x: 'x' is outside repository");
+    for (let i = 0; i < 4; i++) expect((await runCapture(key, opts(fake()))).status).toBe("failed");
+    const state = readState(key);
+    expect(state.lastSha).toBe(before);
+    expect(state.failures).toBeUndefined();
+    expect(state.lastError).toMatchObject({ message: expect.stringContaining("outside repository") });
+    hooks.commitDiffError = new Error("fatal: Unimplemented pathspec magic 'q'");
+    expect((await runCapture(key, opts(fake()))).status).toBe("failed");
+    expect(readState(key).failures).toBeUndefined();
+  });
+
   it("counts a git error on one merge as a strike, then skips it", async () => {
     await runCapture(key, opts(fake()));
     const sha = commit(repo, { "src/ref.ts": FILE }, "feat: referral codes");
-    hooks.commitDiffError = new Error("fatal: bad pathspec");
+    hooks.commitDiffError = new Error("fatal: unable to read tree 1234");
     for (let i = 1; i <= 2; i++) {
       expect(await runCapture(key, opts(fake()))).toMatchObject({ status: "failed" });
       expect(readState(key).failures).toEqual({ sha, count: i });
     }
-    expect(readState(key).lastError).toMatchObject({ message: expect.stringContaining("bad pathspec") });
+    expect(readState(key).lastError).toMatchObject({ message: expect.stringContaining("unable to read tree") });
     expect(await runCapture(key, opts(fake()))).toMatchObject({ status: "done", skipped: 1 });
     expect(readState(key).lastSha).toBe(sha);
-    expect(log()).toContain(`${sha} skipped (failed 3 times: git: fatal: bad pathspec)`);
+    expect(log()).toContain(`${sha} skipped (failed 3 times: git: fatal: unable to read tree 1234)`);
   });
 
   it("reports a git error listing merges as a failed run instead of throwing", async () => {
