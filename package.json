@@ -13,6 +13,10 @@
     "hooks",
     "commands"
   ],
+  "os": [
+    "darwin",
+    "linux"
+  ],
   "engines": {
     "node": ">=24"
   },

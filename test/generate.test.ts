@@ -107,6 +107,23 @@ describe("prompt and CLI arguments", () => {
     expect(args).not.toContain("--bare");
   });
 
+  it("passes CODEBRAIN_SETTING_SOURCES through, defaulting to none", () => {
+    const old = process.env.CODEBRAIN_SETTING_SOURCES;
+    try {
+      const sources = () => {
+        const args = claudeArgs("p");
+        return args[args.indexOf("--setting-sources") + 1];
+      };
+      delete process.env.CODEBRAIN_SETTING_SOURCES;
+      expect(sources()).toBe("");
+      process.env.CODEBRAIN_SETTING_SOURCES = "user";
+      expect(sources()).toBe("user");
+    } finally {
+      if (old === undefined) delete process.env.CODEBRAIN_SETTING_SOURCES;
+      else process.env.CODEBRAIN_SETTING_SOURCES = old;
+    }
+  });
+
   it("accepts only a positive budget from the environment", () => {
     const old = process.env.CODEBRAIN_MAX_BUDGET_USD;
     try {
@@ -139,6 +156,16 @@ describe("parseRawCards", () => {
 
   it("rejects a top-level object", () => {
     expect(() => parseRawCards('{"kind":"mcq","choices":["a","b","c","d"]}')).toThrow(ModelOutputError);
+  });
+
+  it("tries earlier closing brackets when prose after the array has brackets", () => {
+    expect(parseRawCards('Here: [{"kind":"flashcard"}]\nSee [1].')).toEqual([{ kind: "flashcard" }]);
+  });
+
+  it("gives up quickly on a reply full of brackets", () => {
+    const started = Date.now();
+    expect(() => parseRawCards("[x] ".repeat(5_000))).toThrow(ModelOutputError);
+    expect(Date.now() - started).toBeLessThan(2000);
   });
 
   it("rejects invalid JSON", () => {
@@ -196,7 +223,22 @@ describe("runClaude with a fake claude", () => {
     await expect(createRunClaude()("p", "s")).rejects.toThrow(re);
   });
 
-  it("kills the process group on timeout", async () => {
+  it("suggests CODEBRAIN_SETTING_SOURCES when claude fails on auth", async () => {
+    fake(`echo "Invalid API key - please run /login" >&2; exit 1`);
+    await expect(createRunClaude()("p", "s")).rejects.toThrow(/CODEBRAIN_SETTING_SOURCES=user/);
+    fake(`echo boom >&2; exit 1`);
+    await expect(createRunClaude()("p", "s")).rejects.toThrow(/^(?!.*CODEBRAIN_SETTING_SOURCES).*boom/s);
+  });
+
+  it("cleans up stray grandchildren after a normal exit", { timeout: 10_000 }, async () => {
+    const marker = path.join(bin, "stray-alive");
+    fake(`(sleep 1; touch '${marker}') >/dev/null 2>&1 </dev/null & printf '${ok("[]")}'`);
+    await expect(createRunClaude()("p", "s")).resolves.toBe("[]");
+    await new Promise((r) => setTimeout(r, 1500));
+    expect(fs.existsSync(marker)).toBe(false);
+  });
+
+  it("kills the process group on timeout", { timeout: 10_000 }, async () => {
     const marker = path.join(bin, "grandchild-alive");
     fake(`(sleep 2; touch '${marker}') & sleep 30`);
     const started = Date.now();
@@ -206,11 +248,11 @@ describe("runClaude with a fake claude", () => {
     expect(fs.existsSync(marker)).toBe(false);
   });
 
-  it("settles when a grandchild holds the pipes open after claude exits", async () => {
+  it("settles when a grandchild holds the pipes open after claude exits", { timeout: 10_000 }, async () => {
     fake(`sleep 30 & printf '${ok("[]")}'; exit 0`);
     const started = Date.now();
-    await expect(createRunClaude({ timeoutMs: 20_000 })("p", "s")).resolves.toBe("[]");
-    expect(Date.now() - started).toBeLessThan(5000);
+    await expect(createRunClaude({ timeoutMs: 20_000, closeGraceMs: 200 })("p", "s")).resolves.toBe("[]");
+    expect(Date.now() - started).toBeLessThan(1500);
   });
 
   it("kills and rejects output over the cap", async () => {

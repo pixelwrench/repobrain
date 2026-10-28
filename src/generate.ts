@@ -16,10 +16,12 @@ export const MAX_CARDS = 5;
 
 const DEFAULT_TIMEOUT_MS = 180_000;
 /** How long to wait for the pipes to close after claude exits, in case a grandchild holds them. */
-const CLOSE_GRACE_MS = 2_000;
+const DEFAULT_CLOSE_GRACE_MS = 2_000;
 const MAX_STDOUT_CHARS = 2 * 1024 * 1024;
 const MAX_TITLE_CHARS = 200;
 const DEFAULT_BUDGET_USD = "0.50";
+const MAX_PARSE_ATTEMPTS = 2_000;
+const AUTH_ERROR = /\bauth|\blog ?in\b|api[ _-]?key/i;
 
 export function buildPrompt(): string {
   return [
@@ -48,7 +50,9 @@ export function claudeArgs(prompt: string): string[] {
     "-p", prompt,
     "--tools", "",
     "--strict-mcp-config",
-    "--setting-sources", "",
+    // No settings files by default, so no user or project hooks, plugins or env run in the child.
+    // CODEBRAIN_SETTING_SOURCES (e.g. "user") opts back in, for users whose auth lives in settings.json.
+    "--setting-sources", process.env.CODEBRAIN_SETTING_SOURCES ?? "",
     "--disable-slash-commands",
     "--permission-mode", "dontAsk",
     "--max-turns", "1",
@@ -87,13 +91,15 @@ function parseResult(out: string): string {
 }
 
 /**
- * Runs the user's own `claude` with no tools, settings or MCP servers, from an
- * empty directory so no project CLAUDE.md is loaded. CODEBRAIN_CAPTURE=1 makes
+ * Runs the user's own `claude` with no tools or MCP servers, from an empty
+ * directory: no project CLAUDE.md, settings, hooks or memory (a user-level
+ * ~/.claude/CLAUDE.md may still load). CODEBRAIN_CAPTURE=1 makes
  * the plugin's SessionStart hook in that child session exit immediately.
  * The child leads its own process group, so a timeout kills any grandchildren too.
  */
-export function createRunClaude(opts: { timeoutMs?: number } = {}): RunClaude {
+export function createRunClaude(opts: { timeoutMs?: number; closeGraceMs?: number } = {}): RunClaude {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const closeGraceMs = opts.closeGraceMs ?? DEFAULT_CLOSE_GRACE_MS;
   return (prompt, stdin) =>
     new Promise((resolve, reject) => {
       const cwd = path.join(home(), "run");
@@ -103,6 +109,7 @@ export function createRunClaude(opts: { timeoutMs?: number } = {}): RunClaude {
       let err = "";
       let settled = false;
       let graceTimer: NodeJS.Timeout | undefined;
+      let exit: { code: number | null; signal: NodeJS.Signals | null } | null = null;
       const killGroup = () => {
         if (child.pid === undefined) return;
         try {
@@ -116,6 +123,8 @@ export function createRunClaude(opts: { timeoutMs?: number } = {}): RunClaude {
         settled = true;
         clearTimeout(timer);
         clearTimeout(graceTimer);
+        // Once claude has exited, kill anything it left running in its group.
+        if (exit) killGroup();
         child.stdout.destroy();
         child.stderr.destroy();
         fn();
@@ -142,12 +151,14 @@ export function createRunClaude(opts: { timeoutMs?: number } = {}): RunClaude {
       // EPIPE if claude exits before reading stdin; "exit" then reports the outcome.
       child.stdin.on("error", () => {});
 
-      let exit: { code: number | null; signal: NodeJS.Signals | null } | null = null;
       const finish = () => {
         if (!exit) return;
         const { code, signal } = exit;
         if (signal) return fail(new Error(`claude killed by ${signal}: ${err.slice(0, 500)}`));
-        if (code !== 0) return fail(new Error(`claude exited ${code}: ${err.slice(0, 500)}`));
+        if (code !== 0) {
+          const hint = AUTH_ERROR.test(err) ? " (if your Claude auth is set in settings.json, set CODEBRAIN_SETTING_SOURCES=user)" : "";
+          return fail(new Error(`claude exited ${code}${hint}: ${err.slice(0, 500)}`));
+        }
         try {
           const result = parseResult(out);
           settle(() => resolve(result));
@@ -156,12 +167,14 @@ export function createRunClaude(opts: { timeoutMs?: number } = {}): RunClaude {
         }
       };
       child.on("exit", (code, signal) => {
+        // After a timeout or the output cap, the pid may be reused: don't touch the group again.
+        if (settled) return;
         exit = { code, signal };
         // A grandchild may still hold the pipes: read what's buffered, then stop waiting.
         graceTimer = setTimeout(() => {
           killGroup();
           finish();
-        }, CLOSE_GRACE_MS);
+        }, closeGraceMs);
       });
       child.on("close", finish);
       child.stdin.end(stdin);
@@ -194,7 +207,7 @@ function tryJson(text: string): { ok: true; value: unknown } | { ok: false } {
 
 /**
  * Finds the array of cards in a model reply: the whole reply if it is JSON,
- * else a ```json fenced block, else the first `[` that starts a valid array ending at the last `]`.
+ * else a ```json fenced block, else the first bracketed slice that parses as an array.
  */
 export function parseRawCards(text: string): RawCard[] {
   const whole = tryJson(text.trim());
@@ -207,10 +220,15 @@ export function parseRawCards(text: string): RawCard[] {
     const f = tryJson(fenced[1]!);
     if (f.ok && Array.isArray(f.value)) return f.value as RawCard[];
   }
-  const end = text.lastIndexOf("]");
-  for (let start = text.indexOf("["); start >= 0 && start < end; start = text.indexOf("[", start + 1)) {
-    const v = tryJson(text.slice(start, end + 1));
-    if (v.ok && Array.isArray(v.value)) return v.value as RawCard[];
+  // Each `[` from the first, against each `]` from the last backwards. Capped, since each try
+  // parses up to the whole reply and a bracket-heavy reply would otherwise take O(n³).
+  let attempts = 0;
+  for (let start = text.indexOf("["); start >= 0; start = text.indexOf("[", start + 1)) {
+    for (let end = text.lastIndexOf("]"); end > start; end = text.lastIndexOf("]", end - 1)) {
+      if (++attempts > MAX_PARSE_ATTEMPTS) throw new ModelOutputError("no JSON array in model output");
+      const v = tryJson(text.slice(start, end + 1));
+      if (v.ok && Array.isArray(v.value)) return v.value as RawCard[];
+    }
   }
   throw new ModelOutputError("no JSON array in model output");
 }
