@@ -14,13 +14,14 @@ const SECRET_PATTERNS: { name: string; re: RegExp }[] = [
   { name: "jwt", re: /\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/ },
   {
     name: "assignment",
-    re: /[A-Za-z0-9_-]*(api[_-]?key|secret|token|passw(or)?d|pwd|credential)[A-Za-z0-9_-]*["']?\s*[:=]\s*["'][^"'\s]{12,}["']/i,
+    re: /[A-Za-z0-9_-]*(api[_-]?key|secret|token|passw(or)?d|pwd|credential)[A-Za-z0-9_-]*["']?\s*[:=]\s*["'](?!https?:\/\/|\/)[^"'\s]{12,}["']/i,
   },
   {
-    // Unquoted values (.env, YAML). Values that look like code (calls, templates,
-    // trailing , or ;, dotted property paths) are not flagged.
+    // Unquoted values (.env, YAML, Dockerfile ENV). Not flagged: values that look
+    // like code or references (identifiers without digits, dotted property paths,
+    // calls, generics, a leading $), or that end in , or ;.
     name: "assignment-unquoted",
-    re: /^[+\- ]?\s*[A-Za-z0-9_]*(SECRET|PASSWORD|PASSWD|TOKEN|API_?KEY)[A-Za-z0-9_]*\s*[:=]\s*(?![A-Za-z_$][\w$]*(\.[A-Za-z_$][\w$]*)+\s*$)[^\s"'`${}(),;]{12,}\s*$/im,
+    re: /^[+\- ]?\s*(?:(?:export|ENV)\s+)?[A-Za-z0-9_]*(SECRET|PASSWORD|PASSWD|TOKEN|API_?KEY)[A-Za-z0-9_]*\s*[:=]\s*(?![A-Za-z_]+(?:\s+#.*)?\s*$)(?![A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+(?:\s+#.*)?\s*$)(?!\$)(?:[^\s"'`{}()[\]<>|,;]|[,;](?=[^\s"'`{}()[\]<>|,;])){12,}(?:\s+#.*)?\s*$/im,
   },
   // $ { } excluded from the password so templated URLs aren't flagged.
   { name: "connection-string", re: /\b[a-z][a-z0-9+.-]*:\/\/[^\s:/@]+:[^\s@/${}]{6,}@/i },
@@ -31,7 +32,7 @@ export function findSecrets(text: string): string[] {
 }
 
 const SENSITIVE_PATH =
-  /(^|\/)(\.env[^/]*|\.npmrc|\.netrc|\.pypirc|\.pgpass|credentials\.json|service-account[^/]*\.json|[^/]*\.(pem|key|p12|pfx|p8|jks|keystore|tfstate)|id_(rsa|ed25519|ecdsa)[^/]*)$/;
+  /(^|\/)(\.env[^/]*|\.npmrc|\.netrc|\.pypirc|\.pgpass|credentials\.json|service-account[^/]*\.json|[^/]*\.(pem|key|p12|pfx|p8|jks|keystore|tfstate)|id_(rsa|ed25519|ecdsa)[^/]*)$/i;
 
 const C_ESCAPES: Record<string, number> = { a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13 };
 
@@ -123,7 +124,7 @@ export function filterDiff(diff: string): FilteredDiff {
 
 const URL_RE = /\bhttps?:\/\/|\bwww\.[a-z0-9-]+\./i;
 // Case-sensitive letter so "answer a question" isn't flagged.
-const LETTER_REF = /\b([Oo]ptions?|[Aa]nswer|[Cc]hoices?)[\s:]+[A-D]\b|\([A-D]\)|\b[A-D]\)\s|\b[A-D] is (the )?(correct|right|wrong)/;
+const LETTER_REF = /\b([Oo]ptions?|[Aa]nswer|[Cc]hoices?)[\s:]+[A-D]\b|(?<!\w)\([A-D]\)|(?<![\w(])[A-D]\)\s|\b[A-D] is (the )?(correct|right|wrong)/;
 
 export function cardText(body: CardBody): string {
   return body.kind === "mcq" ? [body.question, ...body.choices, body.explanation].join("\n") : `${body.front}\n${body.back}`;

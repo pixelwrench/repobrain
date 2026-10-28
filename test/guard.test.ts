@@ -37,7 +37,12 @@ describe("findSecrets", () => {
     expect(findSecrets("DB_PASS" + `WORD = "${VALUE}"`)).toContain("assignment");
     expect(findSecrets("const clientSec" + `ret = "${VALUE}";`)).toContain("assignment");
     expect(findSecrets("aws_secret_access_" + `key = "${VALUE}"`)).toContain("assignment");
-    expect(findSecrets("+  pass" + "word: correcthorse" + "battery")).toContain("assignment-unquoted");
+    expect(findSecrets("+  pass" + "word: correcthorse" + "battery9")).toContain("assignment-unquoted");
+    expect(findSecrets("  pass" + "word: " + VALUE + "  # rotated monthly")).toContain("assignment-unquoted");
+    expect(findSecrets("export DB_PASS" + "WORD=" + VALUE)).toContain("assignment-unquoted");
+    expect(findSecrets("ENV API_" + "KEY=" + VALUE)).toContain("assignment-unquoted");
+    expect(findSecrets("SMTP_PASS" + "WORD=P@ss$w0rd" + "!2024xyz")).toContain("assignment-unquoted");
+    expect(findSecrets("DB_PASS" + "WORD=ab,cd;ef" + "123456")).toContain("assignment-unquoted");
     expect(findSecrets("API_" + "TOKEN=" + VALUE)).toContain("assignment-unquoted");
   });
   it("ignores ordinary code", () => {
@@ -51,6 +56,16 @@ describe("findSecrets", () => {
       'if (password.length < 12) throw new Error("password too short");',
       'export const API_URL = process.env.API_URL ?? "";',
       "const secret = await vault.read(name);",
+      "      from_secret: deploy_token_name",
+      'access_token_url = "https://example.com/oauth/token"',
+      'const tokenPath = "/var/run/secrets/token";',
+      "password = hashed_password",
+      "token: refreshedAccessToken",
+      "  accessToken: AccessTokenPayload",
+      "tokenizer: WordPieceTokenizer",
+      "type TokenMap = Record<string, AccessToken[]>",
+      "API_TOKEN=${API_TOKEN_FROM_VAULT}",
+      "SECRET_KEY=$SECRET_KEY_FROM_CI_ENV",
     ]) {
       expect(findSecrets(line), line).toEqual([]);
     }
@@ -106,6 +121,8 @@ describe("validateCard", () => {
       expect(validateCard(mcq({ explanation })), explanation).toContain("explanation names an option by letter");
     }
   });
+  it("allows a parenthesised letter in code", () =>
+    expect(validateCard(mcq({ explanation: "Calling f(A) twice would double-charge the customer." }))).toEqual([]));
   it("allows ordinary uses of the word answer", () =>
     expect(validateCard(mcq({ explanation: "Hooks run locally, so they can't answer a question about remote merges." }))).toEqual([]));
 });
@@ -263,7 +280,7 @@ describe("filterDiff edge cases", () => {
   });
 
   it("drops newly sensitive file types", () => {
-    for (const p of [".npmrc", "home/.netrc", ".pypirc", ".pgpass", "keys/AuthKey.p8", "app/release.jks", "android/app.keystore", "credentials.json", "gcp/service-account-prod.json", "infra/terraform.tfstate"]) {
+    for (const p of [".npmrc", "home/.netrc", ".pypirc", ".pgpass", "keys/AuthKey.p8", "app/release.jks", "android/app.keystore", "credentials.json", "gcp/service-account-prod.json", "infra/terraform.tfstate", "config/.ENV", "certs/SERVER.PEM"]) {
       const d = lines(`diff --git a/${p} b/${p}`, "old mode 100644", "new mode 100600");
       expect(filterDiff(d).droppedFiles, p).toBe(1);
     }
