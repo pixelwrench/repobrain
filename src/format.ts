@@ -4,8 +4,10 @@
  * so the braineos vault importer can read cards later.
  */
 
-export type CardStatus = "draft" | "kept" | "dropped";
-export type AnchorStatus = "fresh" | "changed" | "orphaned";
+export const CARD_STATUSES = ["draft", "kept", "dropped"] as const;
+export const ANCHOR_STATUSES = ["fresh", "changed", "orphaned"] as const;
+export type CardStatus = (typeof CARD_STATUSES)[number];
+export type AnchorStatus = (typeof ANCHOR_STATUSES)[number];
 
 export interface Anchor {
   commit: string;
@@ -40,7 +42,7 @@ export class CardFormatError extends Error {}
 export const LETTERS = ["A", "B", "C", "D"];
 
 export function oneLine(s: string): string {
-  return s.replace(/\s*\n\s*/g, " ").trim();
+  return s.replace(/\s+/g, " ").trim();
 }
 
 export function serializeCard(card: Card): string {
@@ -53,6 +55,12 @@ export function serializeCard(card: Card): string {
   };
   const front = Object.entries(meta).map(([k, v]) => `${k}: ${JSON.stringify(v)}`).join("\n");
   const b = card.body;
+  if (b.kind === "mcq") {
+    if (b.choices.length !== LETTERS.length) throw new CardFormatError("a multiple-choice card needs exactly 4 choices");
+    if (!Number.isInteger(b.correctChoice) || b.correctChoice < 0 || b.correctChoice >= LETTERS.length) {
+      throw new CardFormatError("correctChoice must be 0-3");
+    }
+  }
   const body =
     b.kind === "mcq"
       ? [
@@ -79,9 +87,16 @@ export function parseCard(text: string): Card {
     }
   }
   const fields = new Map<string, string>();
+  let last: string | null = null;
   for (const line of m[2].split("\n")) {
-    const f = /^(Q|A|B|C|D|Correct|Explanation|Front|Back): (.*)$/.exec(line);
-    if (f) fields.set(f[1], f[2].trim());
+    const f = /^(Q|A|B|C|D|Correct|Explanation|Front|Back):\s?(.*)$/.exec(line);
+    if (f) {
+      last = f[1];
+      fields.set(last, f[2].trim());
+    } else if (last !== null && line.trim() !== "") {
+      // A wrapped line continues the last label's value.
+      fields.set(last, [fields.get(last), line.trim()].filter(Boolean).join(" "));
+    }
   }
   let body: CardBody;
   if (fields.has("Q")) {
@@ -105,14 +120,19 @@ export function parseCard(text: string): Card {
     if (typeof v !== "number") throw new CardFormatError(`missing ${k}`);
     return v;
   };
+  const oneOf = <T extends string>(k: string, allowed: readonly T[]): T => {
+    const v = str(k);
+    if (!(allowed as readonly string[]).includes(v)) throw new CardFormatError(`${k} must be one of ${allowed.join(", ")}`);
+    return v as T;
+  };
   return {
     id: str("id"), repo: str("repo"), merge: str("merge"), mergeTitle: str("merge_title"), area: str("area"),
-    createdAt: str("created_at"), status: str("status") as CardStatus,
+    createdAt: str("created_at"), status: oneOf("status", CARD_STATUSES),
     anchor: {
       commit: str("anchor_commit"), path: str("anchor_path"),
       symbol: typeof meta.anchor_symbol === "string" ? meta.anchor_symbol : null,
       startLine: num("anchor_start"), endLine: num("anchor_end"), lines: num("anchor_lines"),
-      fingerprint: str("anchor_fingerprint"), status: str("anchor_status") as AnchorStatus,
+      fingerprint: str("anchor_fingerprint"), status: oneOf("anchor_status", ANCHOR_STATUSES),
     },
     body,
   };

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { areaOf, CardFormatError, parseCard, serializeCard, type Card } from "../src/format.js";
+import { ANCHOR_STATUSES, areaOf, CARD_STATUSES, CardFormatError, parseCard, serializeCard, type Card } from "../src/format.js";
 
 const base: Card = {
   id: "abc1234567-1",
@@ -52,6 +52,61 @@ describe("card format", () => {
   it("rejects an invalid answer letter", () => {
     const text = serializeCard(base).replace("Correct: A", "Correct: E");
     expect(() => parseCard(text)).toThrow(/A, B, C or D/);
+  });
+
+  it("keeps wrapped lines in a hand-edited body", () => {
+    const text = serializeCard(base).replace(/^Q: .*$/m, "Q: What\n  continued here\n\nstill more");
+    expect(parseCard(text).body).toMatchObject({ question: "What continued here still more" });
+  });
+
+  it("ignores lines before the first label", () => {
+    const text = serializeCard(base).replace(/^Q: /m, "stray preamble\nQ: ");
+    expect(parseCard(text).body).toMatchObject({ question: base.body.kind === "mcq" ? base.body.question : "" });
+  });
+
+  it("round-trips text containing a carriage return or line separator", () => {
+    for (const q of ["a\rb", "a b", "a b"]) {
+      const card: Card = { ...base, body: { ...base.body, question: q } as Card["body"] };
+      expect(parseCard(serializeCard(card)).body).toMatchObject({ question: "a b" });
+    }
+  });
+
+  it("exports the allowed statuses", () => {
+    expect(CARD_STATUSES).toEqual(["draft", "kept", "dropped"]);
+    expect(ANCHOR_STATUSES).toEqual(["fresh", "changed", "orphaned"]);
+  });
+
+  it("rejects an unknown card status", () => {
+    const text = serializeCard(base).replace('status: "draft"', 'status: "maybe"');
+    expect(() => parseCard(text)).toThrow(/status must be one of/);
+  });
+
+  it("rejects an unknown anchor status", () => {
+    const text = serializeCard(base).replace('anchor_status: "fresh"', 'anchor_status: "stale"');
+    expect(() => parseCard(text)).toThrow(/anchor_status must be one of/);
+  });
+
+  it("accepts a label with no space or an empty value", () => {
+    const text = serializeCard(base).replace("Correct: A", "Correct:A").replace(/^Explanation: .*$/m, "Explanation:");
+    const body = parseCard(text).body;
+    expect(body).toMatchObject({ correctChoice: 0, explanation: "" });
+  });
+
+  it("round-trips a choice whose text looks like a label", () => {
+    const card: Card = { ...base, body: { ...base.body, choices: ["Correct: B", "B: x", "Q: y", "d"] } as Card["body"] };
+    expect(parseCard(serializeCard(card))).toEqual(card);
+  });
+
+  it("refuses to serialise a multiple-choice card without exactly 4 choices", () => {
+    const card = { ...base, body: { ...base.body, choices: ["a", "b", "c"] } as Card["body"] };
+    expect(() => serializeCard(card)).toThrow(CardFormatError);
+  });
+
+  it("refuses to serialise a multiple-choice card with an out-of-range answer", () => {
+    for (const correctChoice of [-1, 4, 1.5]) {
+      const card = { ...base, body: { ...base.body, correctChoice } as Card["body"] };
+      expect(() => serializeCard(card)).toThrow(CardFormatError);
+    }
   });
 
   it("names the area by directory depth", () => {
