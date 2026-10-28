@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { anchorStatusIn } from "./anchor.js";
 import type { AnchorStatus, Card } from "./format.js";
-import { ClaudeLimitError, ClaudeResultError, draftCards, ModelOutputError, runClaude, type RunClaude } from "./generate.js";
+import { ClaudeEnvError, ClaudeLimitError, ClaudeResultError, draftCards, ModelOutputError, runClaude, type RunClaude } from "./generate.js";
 import { commitDiff, defaultBranch, fetchQuietly, fileAt, firstParentCommits, git, isAncestor, mergeBase, resolveCommit, toplevel } from "./git.js";
 import { diffPaths, filterDiff } from "./guard.js";
 import { acquireLock, appendLog, cardPath, listCards, loadConfig, readCard, readState, writeCard, writeState, type RepoState } from "./store.js";
@@ -32,6 +32,13 @@ export interface CaptureOptions {
   run?: RunClaude;
   now?: () => Date;
 }
+
+/**
+ * The repo state as capture keeps it. `unavailable` records the latest environment failure
+ * (claude missing, logged out, offline, rate-limited), from when it began; any successful
+ * claude call clears it.
+ */
+export type CaptureState = RepoState & { unavailable?: { since: string; message: string } };
 
 export interface CaptureReport {
   status: "locked" | "initialized" | "done" | "failed";
@@ -121,7 +128,7 @@ async function capture(key: string, opts: CaptureOptions): Promise<CaptureReport
       appendLog(key, `no commits on ${branch} yet; nothing to capture`);
       return report;
     }
-    const state: RepoState = readState(key);
+    const state: CaptureState = readState(key);
     const save = (sha: string) => {
       state.lastSha = sha;
       state.updatedAt = now().toISOString();
@@ -194,6 +201,7 @@ async function capture(key: string, opts: CaptureOptions): Promise<CaptureReport
       } catch (e) {
         const msg = message(e);
         if (e instanceof ModelOutputError) {
+          delete state.unavailable; // claude answered, just not usefully
           skip(msg);
           continue;
         }
@@ -204,6 +212,10 @@ async function capture(key: string, opts: CaptureOptions): Promise<CaptureReport
         }
         if (!(e instanceof ClaudeResultError || e instanceof ClaudeLimitError)) {
           // claude missing, logged out, offline or similar: not this merge's fault, so no strike.
+          if (e instanceof ClaudeEnvError) {
+            state.unavailable = { since: state.unavailable?.since ?? now().toISOString(), message: msg.slice(0, 500) };
+            writeState(key, state);
+          }
           appendLog(key, `${commit.sha} not drafted, claude unavailable: ${msg}`);
           return { ...report, status: "failed", error: msg };
         }
@@ -217,6 +229,7 @@ async function capture(key: string, opts: CaptureOptions): Promise<CaptureReport
         appendLog(key, `${commit.sha} failed (attempt ${count} of ${MAX_FAILURES}): ${msg}`);
         return { ...report, status: "failed", error: msg };
       }
+      delete state.unavailable;
       const { cards, rejected } = drafted;
       let written = 0;
       for (const card of cards) {

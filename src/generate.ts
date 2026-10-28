@@ -104,7 +104,11 @@ interface ResultJson {
   result?: unknown;
   is_error?: unknown;
   subtype?: unknown;
+  api_error_status?: unknown;
+  terminal_reason?: unknown;
 }
+
+const AUTH_HINT = " (if your Claude auth is set in settings.json, set CODEBRAIN_SETTING_SOURCES=user)";
 
 /** claude's result object from its --output-format json stdout, or null when there is none. */
 function resultJson(out: string): ResultJson | null {
@@ -123,6 +127,17 @@ function resultJson(out: string): ResultJson | null {
 /** The reply text from a result object; throws ClaudeResultError for a failed result. */
 function resultText(res: ResultJson, out: string): string {
   if (res.is_error === false && res.subtype === "success" && typeof res.result === "string") return res.result;
+  // An API failure (bad key, logged out, rate or usage limit, outage) comes back as an is_error
+  // result with subtype "success" and/or API fields. It says nothing about the merge.
+  const status = res.api_error_status;
+  const apiFailure =
+    res.is_error === true && (res.subtype === "success" || (status !== undefined && status !== null) || res.terminal_reason === "api_error");
+  if (apiFailure) {
+    const text = typeof res.result === "string" ? res.result : "";
+    const auth = status === 401 || status === 403 || AUTH_ERROR.test(text);
+    const what = typeof status === "number" ? `API error ${status}` : "API error";
+    throw new ClaudeEnvError(`claude failed (${what})${auth ? AUTH_HINT : ""}: ${(text || out).slice(0, 500)}`);
+  }
   const subtype = typeof res.subtype === "string" ? res.subtype : "unknown";
   throw new ClaudeResultError(subtype, `claude returned an error (${subtype}): ${out.slice(0, 500)}`);
 }
@@ -195,7 +210,7 @@ export function createRunClaude(opts: { timeoutMs?: number; closeGraceMs?: numbe
         // claude reports failures such as a budget overrun as result JSON on stdout, even when it exits non-zero.
         const res = resultJson(out);
         if (code !== 0 && (res === null || (res.is_error === false && res.subtype === "success"))) {
-          const hint = AUTH_ERROR.test(err) ? " (if your Claude auth is set in settings.json, set CODEBRAIN_SETTING_SOURCES=user)" : "";
+          const hint = AUTH_ERROR.test(err) ? AUTH_HINT : "";
           return fail(new ClaudeEnvError(`claude exited ${code}${hint}: ${(err || out).slice(0, 500)}`));
         }
         if (res === null) {

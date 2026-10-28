@@ -237,7 +237,8 @@ describe("runClaude with a fake claude", () => {
     ["a non-zero exit", `echo boom >&2; exit 3`, ClaudeEnvError, /exited 3: boom/],
     ["a non-zero exit with non-result JSON", `printf '{"hello":1}'; exit 1`, ClaudeEnvError, /exited 1/],
     ["death by signal", `kill -9 $$`, ClaudeEnvError, /killed by SIGKILL/],
-    ["is_error", `printf '{"subtype":"success","is_error":true,"result":"x"}'`, ClaudeResultError, /returned an error/],
+    ["is_error with subtype success", `printf '{"subtype":"success","is_error":true,"result":"x"}'`, ClaudeEnvError, /claude failed/],
+    ["a non-success is_error", `printf '{"subtype":"error_max_turns","is_error":true}'`, ClaudeResultError, /returned an error \(error_max_turns\)/],
     ["a null result", `printf '{"subtype":"success","is_error":false,"result":null}'`, ClaudeResultError, /returned an error/],
     ["a non-success subtype", `printf '{"subtype":"error_max_budget_usd","is_error":false,"result":"x"}'`, ClaudeResultError, /returned an error/],
     ["non-JSON stdout", `echo hello`, ClaudeEnvError, /unparseable/],
@@ -254,6 +255,31 @@ describe("runClaude with a fake claude", () => {
     const e = await createRunClaude()("p", "s").catch((x: unknown) => x);
     expect(e).toBeInstanceOf(ClaudeResultError);
     expect((e as ClaudeResultError).subtype).toBe("error_max_budget_usd");
+  });
+
+  const apiError = (status: number, text: string) =>
+    `{"type":"result","subtype":"success","is_error":true,"api_error_status":${status},"terminal_reason":"api_error","result":"${text}"}`;
+
+  it("reports an invalid API key (exit 1, a result object) as an environment error with the auth hint", async () => {
+    fake(`printf '%s' '${apiError(401, "Invalid API key · Fix external API key")}'; exit 1`);
+    const e = await createRunClaude()("p", "s").catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(ClaudeEnvError);
+    expect((e as Error).message).toMatch(/CODEBRAIN_SETTING_SOURCES=user/);
+    expect((e as Error).message).toMatch(/Invalid API key/);
+  });
+
+  it("reports a rate limit as an environment error without the auth hint", async () => {
+    fake(`printf '%s' '${apiError(429, "Rate limited")}'; exit 1`);
+    const e = await createRunClaude()("p", "s").catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(ClaudeEnvError);
+    expect((e as Error).message).not.toMatch(/CODEBRAIN_SETTING_SOURCES/);
+  });
+
+  it("treats any api_error result as an environment error, whatever its subtype", async () => {
+    fake(`printf '{"subtype":"error_during_execution","is_error":true,"terminal_reason":"api_error","result":"overloaded"}'`);
+    await expect(createRunClaude()("p", "s")).rejects.toThrow(ClaudeEnvError);
+    fake(`printf '{"subtype":"error_during_execution","is_error":true,"api_error_status":403,"result":"forbidden"}'; exit 1`);
+    await expect(createRunClaude()("p", "s")).rejects.toThrow(/CODEBRAIN_SETTING_SOURCES=user/);
   });
 
   it("reports a missing claude binary as an environment error", async () => {

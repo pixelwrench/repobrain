@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { runCapture, type CaptureOptions } from "../src/capture.js";
+import { runCapture, type CaptureOptions, type CaptureState } from "../src/capture.js";
 import { ClaudeEnvError, ClaudeLimitError, ClaudeResultError, type RunClaude } from "../src/generate.js";
 import { acquireLock, cardPath, connectRepo, listCards, readCard, readState, repoDir, writeCard, writeState } from "../src/store.js";
 import { commit, makeRepo, sh, useTempHome } from "./helpers.js";
@@ -215,6 +215,29 @@ describe("runCapture", () => {
     expect(readState(key).failures).toBeUndefined();
     expect(log()).toContain("claude unavailable: spawn claude ENOENT");
     expect(listCards(key)).toEqual([]);
+  });
+
+  it("never strikes a merge for an API error such as a bad key, and records claude as unavailable", async () => {
+    await runCapture(key, opts(fake()));
+    commit(repo, { "src/ref.ts": FILE }, "feat: referral codes");
+    const before = readState(key);
+    const run = failing(() => new ClaudeEnvError("claude failed (API error 401): Invalid API key · Fix external API key"));
+    for (let i = 0; i < 4; i++) expect((await runCapture(key, opts(run))).status).toBe("failed");
+    const after: CaptureState = readState(key);
+    expect(after.lastSha).toBe(before.lastSha);
+    expect(after.failures).toBeUndefined();
+    expect(after.unavailable).toEqual({ since: "2026-11-02T09:00:00.000Z", message: expect.stringContaining("Invalid API key") });
+    expect((await runCapture(key, opts(fake()))).cardsWritten).toBe(1);
+    expect((readState(key) as CaptureState).unavailable).toBeUndefined();
+  });
+
+  it("clears the unavailable record after any successful claude call, even a skipped merge", async () => {
+    await runCapture(key, opts(fake()));
+    commit(repo, { "src/ref.ts": FILE }, "feat: referral codes");
+    await runCapture(key, opts(failing(() => new ClaudeEnvError("offline"))));
+    expect((readState(key) as CaptureState).unavailable?.message).toBe("offline");
+    await runCapture(key, opts(async () => "no idea"));
+    expect((readState(key) as CaptureState).unavailable).toBeUndefined();
   });
 
   it("does nothing, quietly, when the repo path is gone", async () => {
