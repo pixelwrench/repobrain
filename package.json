@@ -1,0 +1,32 @@
+{
+  "name": "codebrain",
+  "version": "0.1.0",
+  "description": "Remember the code your AI agents write: spaced-repetition cards from merged changes, drafted by your own Claude.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "codebrain": "dist/bin.js"
+  },
+  "files": [
+    "dist",
+    ".claude-plugin",
+    "hooks",
+    "commands"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "ts-fsrs": "6.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.5"
+  }
+}
