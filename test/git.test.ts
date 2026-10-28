@@ -21,6 +21,34 @@ describe("git helpers", () => {
     expect(defaultBranch(repo)).toBe("master");
   });
 
+  it("prefers a local main or master over the current branch when there is no remote", () => {
+    const repo = makeRepo();
+    commit(repo, { "a.txt": "a\n" }, "first");
+    sh(repo, ["checkout", "-q", "-b", "feature"]);
+    commit(repo, { "b.txt": "b\n" }, "wip");
+    expect(defaultBranch(repo)).toBe("master");
+    sh(repo, ["branch", "-q", "main", "master"]);
+    expect(defaultBranch(repo)).toBe("main");
+  });
+
+  it("uses init.defaultBranch's branch when it exists", () => {
+    const repo = makeRepo();
+    commit(repo, { "a.txt": "a\n" }, "first");
+    sh(repo, ["branch", "-m", "trunk"]);
+    sh(repo, ["checkout", "-q", "-b", "feature"]);
+    sh(repo, ["config", "init.defaultBranch", "trunk"]);
+    expect(defaultBranch(repo)).toBe("trunk");
+  });
+
+  it("uses the current branch, or null for a detached HEAD, when no default exists", () => {
+    const repo = makeRepo();
+    commit(repo, { "a.txt": "a\n" }, "first");
+    sh(repo, ["branch", "-m", "trunk"]);
+    expect(defaultBranch(repo)).toBe("trunk");
+    sh(repo, ["checkout", "-q", "--detach"]);
+    expect(defaultBranch(repo)).toBeNull();
+  });
+
   it("prefers the remote default branch", () => {
     const repo = makeRepo();
     commit(repo, { "a.txt": "a\n" }, "first");

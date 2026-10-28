@@ -29,14 +29,27 @@ function isCommit(repo: string, rev: string): boolean {
   return tryGit(repo, ["rev-parse", "--verify", "--quiet", `${rev}^{commit}`]) !== null;
 }
 
-/** origin's default branch when there is one, else the current local branch. */
-export function defaultBranch(repo: string): string {
+/**
+ * The branch capture follows: origin's default branch, else origin/main or origin/master,
+ * else a local main, master or init.defaultBranch, else the current branch (which may have
+ * no commits yet). Null for a detached HEAD when none of those exist.
+ */
+export function defaultBranch(repo: string): string | null {
   const remoteHead = tryGit(repo, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]);
   if (remoteHead && isCommit(repo, remoteHead)) return remoteHead;
   for (const ref of ["origin/main", "origin/master"]) {
     if (isCommit(repo, ref)) return ref;
   }
-  return tryGit(repo, ["symbolic-ref", "--short", "HEAD"]) ?? "HEAD";
+  const configured = tryGit(repo, ["config", "--get", "init.defaultBranch"]);
+  for (const name of ["main", "master", ...(configured ? [configured] : [])]) {
+    if (isCommit(repo, `refs/heads/${name}`)) return name;
+  }
+  return tryGit(repo, ["symbolic-ref", "--short", "HEAD"]) || null;
+}
+
+/** The commit `rev` names, or null when it names none (an unborn branch, say). */
+export function resolveCommit(repo: string, rev: string): string | null {
+  return tryGit(repo, ["rev-parse", "--verify", "--quiet", `${rev}^{commit}`]) || null;
 }
 
 export function fetchQuietly(repo: string): boolean {

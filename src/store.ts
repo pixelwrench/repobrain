@@ -15,6 +15,10 @@ export interface Config {
 export interface RepoState {
   lastSha: string | null;
   updatedAt: string | null;
+  /** Consecutive failures drafting one merge; capture gives up on it after a few. */
+  failures?: { sha: string; count: number };
+  /** The most recent merges fully handled (cards written or skipped), newest last. Missing in old state files. */
+  processed?: string[];
 }
 
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;

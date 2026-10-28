@@ -3,7 +3,7 @@ import path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { runCapture, type CaptureOptions } from "../src/capture.js";
 import type { RunClaude } from "../src/generate.js";
-import { acquireLock, cardPath, connectRepo, listCards, readCard, readState, repoDir, writeCard } from "../src/store.js";
+import { acquireLock, cardPath, connectRepo, listCards, readCard, readState, repoDir, writeCard, writeState } from "../src/store.js";
 import { commit, makeRepo, sh, useTempHome } from "./helpers.js";
 
 // Pass-through mocks with hooks, so tests can count calls and act at precise moments.
@@ -68,6 +68,15 @@ const fake = (p = "src/ref.ts"): RunClaude => async () => JSON.stringify([cardFo
 const fakeTwo = (p = "src/ref.ts"): RunClaude => async () =>
   JSON.stringify([cardFor(p), cardFor(p, { front: `Why does ${p} return null?`, startLine: 2, endLine: 4 })]);
 const empty: RunClaude = async () => "[]";
+const fakeThree = (p = "src/ref.ts"): RunClaude => async () =>
+  JSON.stringify([
+    cardFor(p),
+    cardFor(p, { front: `Why does ${p} return null?`, startLine: 2, endLine: 4 }),
+    cardFor(p, { front: `What does ${p} call to apply a discount?`, startLine: 4, endLine: 4 }),
+  ]);
+const failing = (msg = "claude exited 1"): RunClaude => async () => {
+  throw new Error(msg);
+};
 const opts = (run: RunClaude, over: CaptureOptions = {}): CaptureOptions => ({
   fetch: false, run, now: () => new Date("2026-11-02T09:00:00Z"), ...over,
 });
@@ -147,13 +156,134 @@ describe("runCapture", () => {
     await runCapture(key, opts(fake()));
     commit(repo, { "src/ref.ts": FILE }, "feat: referral codes");
     const before = readState(key).lastSha;
-    const failing: RunClaude = async () => {
-      throw new Error("claude exited 1");
-    };
-    expect((await runCapture(key, opts(failing))).status).toBe("failed");
+    expect((await runCapture(key, opts(failing()))).status).toBe("failed");
     expect(readState(key).lastSha).toBe(before);
     expect(fs.existsSync(lockFile())).toBe(false);
     expect((await runCapture(key, opts(fake()))).cardsWritten).toBe(1);
+  });
+
+  it("gives up on a merge after it fails three times, and advances", async () => {
+    await runCapture(key, opts(fake()));
+    const sha = commit(repo, { "src/ref.ts": FILE }, "feat: referral codes");
+    const before = readState(key).lastSha;
+    expect((await runCapture(key, opts(failing()))).status).toBe("failed");
+    expect(readState(key)).toMatchObject({ lastSha: before, failures: { sha, count: 1 } });
+    expect((await runCapture(key, opts(failing()))).status).toBe("failed");
+    expect(readState(key).failures).toEqual({ sha, count: 2 });
+    expect(await runCapture(key, opts(failing()))).toMatchObject({ status: "done", skipped: 1 });
+    expect(readState(key).lastSha).toBe(sha);
+    expect(readState(key).failures).toBeUndefined();
+    expect(log()).toContain(`${sha} skipped (failed 3 times: claude exited 1)`);
+  });
+
+  it("resets the failure count after a success, and counts a new merge from one", async () => {
+    await runCapture(key, opts(fake()));
+    commit(repo, { "src/ref.ts": FILE }, "feat: referral codes");
+    await runCapture(key, opts(failing()));
+    await runCapture(key, opts(failing()));
+    expect((await runCapture(key, opts(fake()))).cardsWritten).toBe(1);
+    expect(readState(key).failures).toBeUndefined();
+    const next = commit(repo, { "src/other.ts": FILE }, "feat: other");
+    expect((await runCapture(key, opts(failing()))).status).toBe("failed");
+    expect(readState(key).failures).toEqual({ sha: next, count: 1 });
+  });
+
+  it("skips a merge at once when claude ran out of budget", async () => {
+    await runCapture(key, opts(fake()));
+    const sha = commit(repo, { "src/ref.ts": FILE }, "feat: referral codes");
+    const run = failing('claude returned an error: {"type":"result","subtype":"error_max_budget_usd","is_error":true}');
+    expect(await runCapture(key, opts(run))).toMatchObject({ status: "done", skipped: 1 });
+    expect(readState(key).lastSha).toBe(sha);
+    expect(log()).toContain(`${sha} skipped (over budget`);
+  });
+
+  it("re-initialises when the saved commit shares no history with the branch", async () => {
+    await runCapture(key, opts(fake()));
+    commit(repo, { "src/ref.ts": FILE }, "feat: referral codes");
+    const head = sh(repo, ["rev-parse", "HEAD"]);
+    fs.writeFileSync(path.join(repoDir(key), "state.json"), JSON.stringify({ lastSha: "deadbeef".repeat(5), updatedAt: null }));
+    let called = false;
+    const report = await runCapture(key, opts(async () => ((called = true), "[]")));
+    expect(report.status).toBe("initialized");
+    expect(called).toBe(false);
+    expect(readState(key).lastSha).toBe(head);
+    expect(log()).toContain(`${"deadbeef".repeat(5)} shares no history`);
+  });
+
+  it("captures the default branch, not the checked-out feature branch", async () => {
+    await runCapture(key, opts(fake()));
+    sh(repo, ["checkout", "-q", "-b", "feature"]);
+    commit(repo, { "src/wip.ts": FILE }, "wip");
+    expect((await runCapture(key, opts(fake("src/wip.ts")))).processed).toBe(0);
+    sh(repo, ["checkout", "-q", "master"]);
+    const sha = commit(repo, { "src/ref.ts": FILE }, "feat: referral codes");
+    sh(repo, ["checkout", "-q", "feature"]);
+    expect(await runCapture(key, opts(fake()))).toMatchObject({ processed: 1, cardsWritten: 1 });
+    expect(readState(key).lastSha).toBe(sha);
+  });
+
+  it("does nothing, quietly, on a detached HEAD with no default branch", async () => {
+    sh(repo, ["branch", "-m", "trunk"]);
+    sh(repo, ["checkout", "-q", "--detach"]);
+    expect(await runCapture(key, opts(fake()))).toMatchObject({ status: "done", processed: 0 });
+    expect(readState(key).lastSha).toBeNull();
+    expect(log()).toContain("no default branch found");
+  });
+
+  it("does nothing, quietly, in a repo with no commits", async () => {
+    const bare = makeRepo();
+    const k = connectRepo(bare);
+    expect(await runCapture(k, opts(fake()))).toMatchObject({ status: "done", processed: 0 });
+    expect(fs.readFileSync(path.join(repoDir(k), "capture.log"), "utf8")).toContain("no commits");
+  });
+
+  it("records processed merges and re-drafts a merge interrupted mid-write", async () => {
+    await runCapture(key, opts(fake()));
+    const init = readState(key).lastSha;
+    const sha = commit(repo, { "src/ref.ts": FILE }, "feat: referral codes");
+    await runCapture(key, opts(fakeThree()));
+    expect(readState(key).processed).toEqual([sha]);
+    const [first, second, third] = listCards(key);
+    // Simulate a crash after the first card file was written.
+    fs.rmSync(cardPath(key, second.id));
+    fs.rmSync(cardPath(key, third.id));
+    writeCard(key, { ...first, mergeTitle: "stale" });
+    fs.writeFileSync(path.join(repoDir(key), "state.json"), JSON.stringify({ lastSha: init, updatedAt: null, processed: [] }));
+    expect((await runCapture(key, opts(fakeThree()))).cardsWritten).toBe(3);
+    expect(listCards(key)).toHaveLength(3);
+    expect(readCard(key, first.id).mergeTitle).toBe("feat: referral codes");
+    expect(readState(key).processed).toEqual([sha]);
+
+    // The same crash with the first card already kept: it survives the re-draft.
+    fs.rmSync(cardPath(key, second.id));
+    fs.rmSync(cardPath(key, third.id));
+    writeCard(key, { ...first, status: "kept", mergeTitle: "curated" });
+    fs.writeFileSync(path.join(repoDir(key), "state.json"), JSON.stringify({ lastSha: init, updatedAt: null, processed: [] }));
+    expect((await runCapture(key, opts(fakeThree()))).cardsWritten).toBe(2);
+    expect(readCard(key, first.id)).toMatchObject({ status: "kept", mergeTitle: "curated" });
+  });
+
+  it("falls back to card files to tell done merges apart in an old state file", async () => {
+    await runCapture(key, opts(fake()));
+    const init = readState(key).lastSha;
+    commit(repo, { "src/ref.ts": FILE }, "feat: referral codes");
+    await runCapture(key, opts(fake()));
+    fs.writeFileSync(path.join(repoDir(key), "state.json"), JSON.stringify({ lastSha: init, updatedAt: null }));
+    let called = false;
+    await runCapture(key, opts(async () => ((called = true), "[]")));
+    expect(called).toBe(false);
+  });
+
+  it("caps the processed list at the last 500 merges", async () => {
+    await runCapture(key, opts(fake()));
+    const old = Array.from({ length: 500 }, (_, i) => i.toString(16).padStart(40, "0"));
+    writeState(key, { ...readState(key), processed: old });
+    const sha = commit(repo, { "src/ref.ts": FILE }, "feat: referral codes");
+    await runCapture(key, opts(fake()));
+    const processed = readState(key).processed!;
+    expect(processed).toHaveLength(500);
+    expect(processed[0]).toBe(old[1]);
+    expect(processed.at(-1)).toBe(sha);
   });
 
   it("never overwrites a card the user has curated, even on a retry", async () => {
@@ -237,16 +367,17 @@ describe("runCapture", () => {
     hooks.refreshes = 0;
     hooks.releases = 0;
     await runCapture(key, opts(empty));
-    expect(hooks.refreshes).toBe(3);
+    // At least once per saved merge, plus once before the anchor loop.
+    expect(hooks.refreshes).toBeGreaterThanOrEqual(3);
     expect(hooks.releases).toBe(1);
     expect(fs.existsSync(lockFile())).toBe(false);
   });
 
   it("logs an unexpected error, releases the lock and rethrows", async () => {
     await runCapture(key, opts(fake()));
-    fs.rmSync(path.join(repo, ".git"), { recursive: true, force: true });
-    await expect(runCapture(key, opts(fake()))).rejects.toThrow();
-    expect(log()).toMatch(/capture failed: /);
+    fs.writeFileSync(path.join(repoDir(key), "state.json"), "garbage");
+    await expect(runCapture(key, opts(fake()))).rejects.toThrow(/state\.json is not valid JSON/);
+    expect(log()).toMatch(/capture failed: .*state\.json is not valid JSON/);
     expect(fs.existsSync(lockFile())).toBe(false);
   });
 

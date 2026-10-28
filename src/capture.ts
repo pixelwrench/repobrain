@@ -3,9 +3,9 @@ import path from "node:path";
 import { anchorStatusIn } from "./anchor.js";
 import type { AnchorStatus, Card } from "./format.js";
 import { draftCards, ModelOutputError, runClaude, type RunClaude } from "./generate.js";
-import { commitDiff, defaultBranch, fetchQuietly, fileAt, firstParentCommits, git, isAncestor, mergeBase, revParse } from "./git.js";
+import { commitDiff, defaultBranch, fetchQuietly, fileAt, firstParentCommits, git, isAncestor, mergeBase, resolveCommit } from "./git.js";
 import { diffPaths, filterDiff } from "./guard.js";
-import { acquireLock, appendLog, cardPath, listCards, loadConfig, readCard, readState, writeCard, writeState } from "./store.js";
+import { acquireLock, appendLog, cardPath, listCards, loadConfig, readCard, readState, writeCard, writeState, type RepoState } from "./store.js";
 
 /** Glob pathspecs never sent to the model. `.codebrain/ignore` in the repo adds more, one per line. */
 export const DEFAULT_EXCLUDES = [
@@ -15,6 +15,12 @@ export const DEFAULT_EXCLUDES = [
 
 const DEFAULT_MAX_MERGES = 5;
 const DEFAULT_MAX_DIFF_BYTES = 60_000;
+/** A merge whose drafting fails this many times in a row is skipped. */
+const MAX_FAILURES = 3;
+/** How many recently processed merges the state file remembers. */
+const MAX_PROCESSED = 500;
+/** claude's result subtype when --max-budget-usd stopped it; generate includes the raw result in its error. */
+const OVER_BUDGET = /error_max_budget/;
 
 export interface CaptureOptions {
   /** Most merges drafted per run (default 5); the rest wait for the next run. */
@@ -103,14 +109,34 @@ async function capture(key: string, opts: CaptureOptions): Promise<CaptureReport
   const maxDiffBytes = opts.maxDiffBytes ?? DEFAULT_MAX_DIFF_BYTES;
   try {
     if (opts.fetch ?? true) fetchQuietly(repo.path);
-    const head = revParse(repo.path, defaultBranch(repo.path));
-    const state = readState(key);
+    const branch = defaultBranch(repo.path);
+    if (branch === null) {
+      appendLog(key, "no default branch found (detached HEAD and no main or master); nothing to capture");
+      return report;
+    }
+    const head = resolveCommit(repo.path, branch);
+    if (head === null) {
+      appendLog(key, `no commits on ${branch} yet; nothing to capture`);
+      return report;
+    }
+    const state: RepoState = readState(key);
     const save = (sha: string) => {
-      writeState(key, { lastSha: sha, updatedAt: now().toISOString() });
+      state.lastSha = sha;
+      state.updatedAt = now().toISOString();
+      writeState(key, state);
       lock.refresh();
+    };
+    /** Records a merge as fully handled (its cards written, or skipped) and saves past it. */
+    const finish = (sha: string) => {
+      if (state.processed) {
+        state.processed = [...state.processed.filter((s) => s !== sha), sha].slice(-MAX_PROCESSED);
+      }
+      delete state.failures;
+      save(sha);
     };
 
     if (!state.lastSha && !opts.since) {
+      state.processed = [];
       save(head);
       return { ...report, status: "initialized" };
     }
@@ -118,29 +144,40 @@ async function capture(key: string, opts: CaptureOptions): Promise<CaptureReport
     if (state.lastSha) {
       // After a force-push or rebase, restart from the common ancestor.
       from = isAncestor(repo.path, state.lastSha, head) ? state.lastSha : mergeBase(repo.path, state.lastSha, head);
+      if (from === null) {
+        // The saved commit is gone (force-push plus gc) or unrelated: drafting from the root would flood the user.
+        appendLog(key, `saved commit ${state.lastSha} shares no history with ${branch}; re-initialising at ${head}`);
+        delete state.failures;
+        state.processed = [];
+        save(head);
+        return { ...report, status: "initialized" };
+      }
     }
-    const done = new Set(listCards(key).map((c) => c.merge));
+    // Old state files have no processed list: fall back to merges that have card files.
+    const done = new Set(state.processed ?? listCards(key).map((c) => c.merge));
+    state.processed ??= [];
     const excludes = [...DEFAULT_EXCLUDES, ...readIgnore(repo.path)];
     const commits = firstParentCommits(repo.path, from, head, from ? undefined : opts.since).slice(0, opts.maxMerges ?? DEFAULT_MAX_MERGES);
 
     for (const commit of commits) {
       if (done.has(commit.sha)) {
-        save(commit.sha);
+        finish(commit.sha);
         continue;
       }
+      const skip = (why: string) => {
+        report.skipped++;
+        appendLog(key, `${commit.sha} skipped (${why})`);
+        finish(commit.sha);
+      };
       const raw = commitDiff(repo.path, commit.sha, excludes, maxDiffBytes);
       if (raw === null) {
-        report.skipped++;
-        appendLog(key, `${commit.sha} skipped (shallow boundary or diff over ${maxDiffBytes} bytes)`);
-        save(commit.sha);
+        skip(`shallow boundary or diff over ${maxDiffBytes} bytes`);
         continue;
       }
       const { diff, droppedHunks, droppedFiles } = filterDiff(raw);
       if (droppedHunks || droppedFiles) appendLog(key, `${commit.sha} secret filter dropped ${droppedHunks} hunks, ${droppedFiles} files`);
       if (diff.trim() === "") {
-        report.skipped++;
-        appendLog(key, `${commit.sha} skipped (nothing to send)`);
-        save(commit.sha);
+        skip("nothing to send");
         continue;
       }
       let drafted;
@@ -153,14 +190,25 @@ async function capture(key: string, opts: CaptureOptions): Promise<CaptureReport
           opts.run ?? runClaude,
         );
       } catch (e) {
+        const msg = message(e);
         if (e instanceof ModelOutputError) {
-          report.skipped++;
-          appendLog(key, `${commit.sha} skipped (${e.message})`);
-          save(commit.sha);
+          skip(msg);
           continue;
         }
-        appendLog(key, `${commit.sha} failed: ${message(e)}`);
-        return { ...report, status: "failed", error: message(e) };
+        // Retrying a merge that hit the budget would spend the same again for nothing.
+        if (OVER_BUDGET.test(msg)) {
+          skip(`over budget: ${msg.slice(0, 200)}`);
+          continue;
+        }
+        const count = state.failures?.sha === commit.sha ? state.failures.count + 1 : 1;
+        if (count >= MAX_FAILURES) {
+          skip(`failed ${count} times: ${msg}`);
+          continue;
+        }
+        state.failures = { sha: commit.sha, count };
+        writeState(key, state);
+        appendLog(key, `${commit.sha} failed (attempt ${count} of ${MAX_FAILURES}): ${msg}`);
+        return { ...report, status: "failed", error: msg };
       }
       const { cards, rejected } = drafted;
       let written = 0;
@@ -175,7 +223,8 @@ async function capture(key: string, opts: CaptureOptions): Promise<CaptureReport
       report.processed++;
       report.cardsWritten += written;
       appendLog(key, `${commit.sha} ${written} cards, ${rejected.length} rejected${rejected.length ? `: ${rejected.map((r) => r.reason).join(" | ")}` : ""}`);
-      save(commit.sha);
+      // Only now, with every card file written, does the merge count as processed.
+      finish(commit.sha);
     }
     if (commits.length === 0 && state.lastSha !== head) save(head);
 
