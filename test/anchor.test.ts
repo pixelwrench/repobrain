@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { checkAnchor, locateAnchor, makeAnchor } from "../src/anchor.js";
+import { locateAnchor, makeAnchor } from "../src/anchor.js";
+import type { Anchor } from "../src/format.js";
+import { fileAt } from "../src/git.js";
 import { commit, makeRepo } from "./helpers.js";
+
+/** The anchor's status in the file at `rev`. */
+const statusAt = (repo: string, rev: string, a: Anchor) => locateAnchor(fileAt(repo, rev, a.path), a).status;
 
 const FILE = ["export function applyReferral(code: string) {", "  const ref = lookup(code);", "  if (!ref) return null;", "  return discount(ref);", "}", ""].join("\n");
 
@@ -67,7 +72,7 @@ describe("anchors", () => {
     const a = makeAnchor(repo, sha, "src/ref.ts", 1, 5, null)!;
     const moved = "import { lookup } from './db';\n\n" + FILE.replace(/^ {2}/gm, "    ");
     const head = commit(repo, { "src/ref.ts": moved }, "move");
-    expect(checkAnchor(repo, head, a)).toBe("fresh");
+    expect(statusAt(repo, head, a)).toBe("fresh");
   });
 
   it("stays fresh with CRLF line endings or blank lines inside the block", () => {
@@ -75,9 +80,9 @@ describe("anchors", () => {
     const sha = commit(repo, { "src/ref.ts": FILE }, "add referral");
     const a = makeAnchor(repo, sha, "src/ref.ts", 1, 5, null)!;
     const crlf = commit(repo, { "src/ref.ts": FILE.replace(/\n/g, "\r\n") }, "crlf");
-    expect(checkAnchor(repo, crlf, a)).toBe("fresh");
+    expect(statusAt(repo, crlf, a)).toBe("fresh");
     const spaced = commit(repo, { "src/ref.ts": FILE.replace("return null;\n", "return null;\n\n   \n") }, "spaced");
-    expect(checkAnchor(repo, spaced, a)).toBe("fresh");
+    expect(statusAt(repo, spaced, a)).toBe("fresh");
   });
 
   it("reports changed when the block's code changes", () => {
@@ -85,15 +90,15 @@ describe("anchors", () => {
     const sha = commit(repo, { "src/ref.ts": FILE }, "add referral");
     const a = makeAnchor(repo, sha, "src/ref.ts", 1, 5, null)!;
     const head = commit(repo, { "src/ref.ts": FILE.replace("return null", "throw new Error('bad code')") }, "change");
-    expect(checkAnchor(repo, head, a)).toBe("changed");
+    expect(statusAt(repo, head, a)).toBe("changed");
   });
 
   it("reports changed for an anchor whose line count is impossible", () => {
     const repo = makeRepo();
     const sha = commit(repo, { "src/ref.ts": FILE }, "add referral");
     const a = makeAnchor(repo, sha, "src/ref.ts", 1, 5, null)!;
-    expect(checkAnchor(repo, sha, { ...a, lines: 0 })).toBe("changed");
-    expect(checkAnchor(repo, sha, { ...a, lines: 99 })).toBe("changed");
+    expect(statusAt(repo, sha, { ...a, lines: 0 })).toBe("changed");
+    expect(statusAt(repo, sha, { ...a, lines: 99 })).toBe("changed");
   });
 
   it("reports orphaned when the file is deleted", () => {
@@ -101,7 +106,7 @@ describe("anchors", () => {
     const sha = commit(repo, { "src/ref.ts": FILE, "keep.txt": "k\n" }, "add referral");
     const a = makeAnchor(repo, sha, "src/ref.ts", 1, 5, null)!;
     const head = commit(repo, { "src/ref.ts": null }, "delete");
-    expect(checkAnchor(repo, head, a)).toBe("orphaned");
+    expect(statusAt(repo, head, a)).toBe("orphaned");
   });
 
   it("reports orphaned when the path has become a directory", () => {
@@ -109,7 +114,7 @@ describe("anchors", () => {
     const sha = commit(repo, { "src/ref.ts": FILE }, "add referral");
     const a = makeAnchor(repo, sha, "src/ref.ts", 1, 5, null)!;
     const head = commit(repo, { "src/ref.ts": null, "src/ref.ts/index.ts": FILE }, "now a dir");
-    expect(checkAnchor(repo, head, a)).toBe("orphaned");
+    expect(statusAt(repo, head, a)).toBe("orphaned");
   });
 
   it("locates a moved block by its original line numbers, blank lines and CRLF included", () => {

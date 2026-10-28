@@ -83,7 +83,14 @@ export function claudeArgs(prompt: string): string[] {
     "--max-budget-usd", budget(),
     "--output-format", "json",
     "--no-session-persistence",
+    ...model(),
   ];
+}
+
+/** CODEBRAIN_MODEL, when set, picks the model (`--model`); otherwise claude's default is used. */
+function model(): string[] {
+  const m = process.env.CODEBRAIN_MODEL?.trim();
+  return m ? ["--model", m] : [];
 }
 
 /** Auth and provider selection survive; other CLAUDE_CODE_* vars from a parent session don't. */
@@ -92,7 +99,8 @@ const KEEP_CLAUDE_CODE = /^CLAUDE_CODE_(OAUTH_|USE_|SKIP_[A-Z_]*AUTH$|API_KEY_|C
 function childEnv(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const [k, v] of Object.entries(process.env)) {
-    if (k === "CLAUDECODE") continue;
+    // CLAUDE_EFFORT from a parent session would change the drafting run's effort and cost.
+    if (k === "CLAUDECODE" || k === "CLAUDE_EFFORT") continue;
     if (k.startsWith("CLAUDE_CODE_") && !KEEP_CLAUDE_CODE.test(k)) continue;
     env[k] = v;
   }

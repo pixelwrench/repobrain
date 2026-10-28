@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { appendLog, findRepo, loadConfig } from "./store.js";
+import { appendLog, findRepo, home, loadConfig } from "./store.js";
 
 /** bin.js beside this module: dist/bin.js when built. */
 const defaultBin = path.join(path.dirname(fileURLToPath(import.meta.url)), "bin.js");
@@ -29,6 +29,16 @@ function treesOf(repoPath: string): string[] {
   return trees;
 }
 
+/** `<CODEBRAIN_HOME>/capture-errors.log` opened for append, or null when it can't be. */
+function openErrorLog(): number | null {
+  try {
+    fs.mkdirSync(home(), { recursive: true });
+    return fs.openSync(path.join(home(), "capture-errors.log"), "a");
+  } catch {
+    return null;
+  }
+}
+
 const isWithin = (dir: string, root: string) => dir === root || dir.startsWith(root.endsWith(path.sep) ? root : root + path.sep);
 
 /**
@@ -52,13 +62,26 @@ export function startCapture(cwd: string, bin = defaultBin): boolean {
       appendLog(found.key, `codebrain bin missing at ${bin}; rebuild or reinstall`);
       return false;
     }
-    const child = spawn(process.execPath, [bin, "capture", "--repo", found.config.path], {
-      detached: true,
-      stdio: "ignore",
-      env: { ...process.env, CODEBRAIN_CAPTURE: "1" },
-    });
-    child.on("error", () => {}); // a failed spawn is emitted async; don't let it crash the hook
-    child.unref();
+    // The child's stderr goes to capture-errors.log, so a capture that dies before it can log
+    // (a broken install, a failed import) still leaves a trace.
+    const errFd = openErrorLog();
+    try {
+      const child = spawn(process.execPath, [bin, "capture", "--repo", found.config.path], {
+        detached: true,
+        stdio: ["ignore", "ignore", errFd ?? "ignore"],
+        env: { ...process.env, CODEBRAIN_CAPTURE: "1" },
+      });
+      child.on("error", () => {}); // a failed spawn is emitted async; don't let it crash the hook
+      child.unref();
+    } finally {
+      if (errFd !== null) {
+        try {
+          fs.closeSync(errFd); // the child has its own copy
+        } catch {
+          // already closed
+        }
+      }
+    }
     return true;
   } catch {
     return false;

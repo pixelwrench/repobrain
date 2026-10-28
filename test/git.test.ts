@@ -1,6 +1,8 @@
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   commitDiff,
   defaultBranch,
@@ -9,7 +11,7 @@ import {
   firstParentCommits,
   isAncestor,
   mergeBase,
-  revParse,
+  resolveCommit,
   repoRoots,
   toplevel,
 } from "../src/git.js";
@@ -80,7 +82,7 @@ describe("git helpers", () => {
     commit(repo, { "src/b.ts": "export const b = 1;\n", "package-lock.json": "{}\n" }, "feature");
     sh(repo, ["checkout", "-q", "master"]);
     sh(repo, ["merge", "-q", "--no-ff", "feature", "-m", "Merge feature"]);
-    const diff = commitDiff(repo, revParse(repo, "HEAD"), ["**/package-lock.json"]);
+    const diff = commitDiff(repo, resolveCommit(repo, "HEAD")!, ["**/package-lock.json"]);
     expect(diff).toContain("src/b.ts");
     expect(diff).not.toContain("package-lock.json");
   });
@@ -106,11 +108,64 @@ describe("git helpers", () => {
     expect(process.env.GIT_CONFIG_NOSYSTEM).toBe("1");
   });
 
+  it("keeps tests away from the real CodeBrain home and the real claude", () => {
+    expect(process.env.CODEBRAIN_HOME).toBeTruthy();
+    expect(process.env.CODEBRAIN_HOME!.startsWith(os.tmpdir())).toBe(true);
+    const r = spawnSync("claude", ["--version"], { encoding: "utf8" });
+    expect(r.status).toBe(97);
+    expect(r.stderr).toContain("the real claude must never run in tests");
+  });
+
   it("returns false when fetching from a dead remote", () => {
     const repo = makeRepo();
     commit(repo, { "a.txt": "a\n" }, "first");
     sh(repo, ["remote", "add", "origin", path.join(tempDir("codebrain-gone-"), "missing")]);
     expect(fetchQuietly(repo)).toBe(false);
+  });
+
+  describe("fetchQuietly over ssh", () => {
+    let repo: string;
+    let stub: string;
+    let record: string;
+    const saved = { PATH: process.env.PATH, GIT_SSH_COMMAND: process.env.GIT_SSH_COMMAND };
+    beforeEach(() => {
+      repo = makeRepo();
+      commit(repo, { "a.txt": "a\n" }, "first");
+      sh(repo, ["remote", "add", "origin", "ssh://git@example.invalid/x.git"]);
+      stub = tempDir("codebrain-ssh-");
+      record = path.join(stub, "calls");
+      for (const name of ["ssh", "myssh"]) {
+        fs.writeFileSync(path.join(stub, name), `#!/bin/sh\necho "${name} $*" >> ${JSON.stringify(record)}\nexit 255\n`, { mode: 0o755 });
+      }
+      process.env.PATH = `${stub}${path.delimiter}${saved.PATH}`;
+      delete process.env.GIT_SSH_COMMAND;
+    });
+    afterEach(() => {
+      process.env.PATH = saved.PATH;
+      if (saved.GIT_SSH_COMMAND === undefined) delete process.env.GIT_SSH_COMMAND;
+      else process.env.GIT_SSH_COMMAND = saved.GIT_SSH_COMMAND;
+    });
+
+    it("runs ssh in batch mode by default", () => {
+      expect(fetchQuietly(repo)).toBe(false);
+      expect(fs.readFileSync(record, "utf8")).toMatch(/^ssh .*-o BatchMode=yes/m);
+    });
+
+    it("keeps the user's core.sshCommand", () => {
+      sh(repo, ["config", "core.sshCommand", "myssh -v"]);
+      fetchQuietly(repo);
+      const calls = fs.readFileSync(record, "utf8");
+      expect(calls).toMatch(/^myssh -v /m);
+      expect(calls).not.toContain("BatchMode");
+    });
+
+    it("keeps the user's GIT_SSH_COMMAND", () => {
+      process.env.GIT_SSH_COMMAND = "myssh -q";
+      fetchQuietly(repo);
+      const calls = fs.readFileSync(record, "utf8");
+      expect(calls).toMatch(/^myssh -q /m);
+      expect(calls).not.toContain("BatchMode");
+    });
   });
 
   it("uses origin/HEAD when it is set", () => {
@@ -144,7 +199,7 @@ describe("git helpers", () => {
     commit(repo, { "b.txt": "b\n" }, "second");
     const clone = path.join(tempDir("codebrain-clone-"), "c");
     sh(repo, ["clone", "-q", "--depth", "1", `file://${repo}`, clone]);
-    expect(commitDiff(clone, revParse(clone, "HEAD"), [])).toBeNull();
+    expect(commitDiff(clone, resolveCommit(clone, "HEAD")!, [])).toBeNull();
   });
 
   it("returns null when the diff is larger than maxBytes", () => {

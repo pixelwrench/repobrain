@@ -1,8 +1,8 @@
 ---
 description: Go through draft CodeBrain cards and keep, fix or drop each one
-allowed-tools: Bash(codebrain *), Read, Edit(~/.codebrain/**)
+allowed-tools: Bash(codebrain week*), Bash(codebrain curate *), Bash(codebrain show *), Bash(codebrain card *), Read, Edit(~/.codebrain/repos/*/cards/*.md)
 ---
-If `codebrain` isn't found, say the plugin's CLI isn't built or installed (run `npm run build` in the plugin's folder) and stop. Every `codebrain` command prints JSON; on a non-zero exit it carries an `error` field.
+If `codebrain` isn't found, say the plugin's CLI isn't built or installed: run `npm run build` in the checkout, then update the installed plugin (see "After changing the code" in the README). Then stop. Every `codebrain` command prints JSON; on a non-zero exit it carries an `error` field.
 
 Run `codebrain week`. If it fails, show the error and stop; if it says the repository isn't connected, suggest `/codebrain:connect`.
 

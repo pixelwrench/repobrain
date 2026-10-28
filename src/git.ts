@@ -54,13 +54,15 @@ export function resolveCommit(repo: string, rev: string): string | null {
   return tryGit(repo, ["rev-parse", "--verify", "--quiet", `${rev}^{commit}`]) || null;
 }
 
+/**
+ * `git fetch origin`, never prompting. ssh runs in batch mode (no password or host-key prompts),
+ * unless the user set their own ssh command (GIT_SSH_COMMAND or core.sshCommand), which is kept as is.
+ */
 export function fetchQuietly(repo: string): boolean {
-  const args = ["fetch", "--quiet", "--no-recurse-submodules", "--no-auto-gc", "origin"];
+  const ownSsh = process.env.GIT_SSH_COMMAND || tryGit(repo, ["config", "--get", "core.sshCommand"]);
+  const batch = ownSsh ? [] : ["-c", "core.sshCommand=ssh -o BatchMode=yes"];
+  const args = [...batch, "fetch", "--quiet", "--no-recurse-submodules", "--no-auto-gc", "origin"];
   return tryGit(repo, args, { timeoutMs: 30_000 }) !== null;
-}
-
-export function revParse(repo: string, rev: string): string {
-  return git(repo, ["rev-parse", rev]).trim();
 }
 
 export function isAncestor(repo: string, a: string, b: string): boolean {

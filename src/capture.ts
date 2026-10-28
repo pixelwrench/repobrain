@@ -33,9 +33,6 @@ export interface CaptureOptions {
   now?: () => Date;
 }
 
-/** The repo state as capture keeps it; an alias kept for callers that imported it from here. */
-export type CaptureState = RepoState;
-
 export interface CaptureReport {
   status: "locked" | "initialized" | "done" | "failed";
   processed: number;

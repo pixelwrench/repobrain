@@ -119,6 +119,22 @@ describe("prompt and CLI arguments", () => {
     expect(args).not.toContain("--bare");
   });
 
+  it("passes CODEBRAIN_MODEL as --model only when it is set", () => {
+    const old = process.env.CODEBRAIN_MODEL;
+    try {
+      delete process.env.CODEBRAIN_MODEL;
+      expect(claudeArgs("p")).not.toContain("--model");
+      process.env.CODEBRAIN_MODEL = "  ";
+      expect(claudeArgs("p")).not.toContain("--model");
+      process.env.CODEBRAIN_MODEL = "sonnet";
+      const args = claudeArgs("p");
+      expect(args[args.indexOf("--model") + 1]).toBe("sonnet");
+    } finally {
+      if (old === undefined) delete process.env.CODEBRAIN_MODEL;
+      else process.env.CODEBRAIN_MODEL = old;
+    }
+  });
+
   it("allows CODEBRAIN_SETTING_SOURCES only as user, defaulting to none", () => {
     const old = process.env.CODEBRAIN_SETTING_SOURCES;
     try {
@@ -214,14 +230,14 @@ describe("runClaude with a fake claude", () => {
   const ok = (result: string) => `{"type":"result","subtype":"success","is_error":false,"result":"${result}"}`;
 
   it("returns the result from a neutral cwd with a cleaned environment", async () => {
-    fake(`cat >/dev/null; printf '${ok("%s|%s|%s|%s|%s")}' "$PWD" "$CODEBRAIN_CAPTURE" "\${CLAUDECODE:-unset}" "\${CLAUDE_CODE_ENTRYPOINT:-unset}" "\${CLAUDE_CODE_OAUTH_TOKEN:-unset}"`);
+    fake(`cat >/dev/null; printf '${ok("%s|%s|%s|%s|%s|%s")}' "$PWD" "$CODEBRAIN_CAPTURE" "\${CLAUDECODE:-unset}" "\${CLAUDE_CODE_ENTRYPOINT:-unset}" "\${CLAUDE_CODE_OAUTH_TOKEN:-unset}" "\${CLAUDE_EFFORT:-unset}"`);
     const saved = { ...process.env };
-    Object.assign(process.env, { CLAUDECODE: "1", CLAUDE_CODE_ENTRYPOINT: "cli", CLAUDE_CODE_OAUTH_TOKEN: "kept" });
+    Object.assign(process.env, { CLAUDECODE: "1", CLAUDE_CODE_ENTRYPOINT: "cli", CLAUDE_CODE_OAUTH_TOKEN: "kept", CLAUDE_EFFORT: "max" });
     try {
       const out = await createRunClaude()("prompt", "stdin");
-      expect(out).toBe(`${path.join(home, "run")}|1|unset|unset|kept`);
+      expect(out).toBe(`${path.join(home, "run")}|1|unset|unset|kept|unset`);
     } finally {
-      for (const k of ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_OAUTH_TOKEN"]) {
+      for (const k of ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_EFFORT"]) {
         if (saved[k] === undefined) delete process.env[k];
         else process.env[k] = saved[k];
       }

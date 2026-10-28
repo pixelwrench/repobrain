@@ -2,7 +2,7 @@
 description: Quiz yourself on due CodeBrain cards for this repository
 allowed-tools: Bash(codebrain due *), Bash(codebrain answer *), Bash(codebrain grade *)
 ---
-If `codebrain` isn't found, say the plugin's CLI isn't built or installed (run `npm run build` in the plugin's folder) and stop. Every `codebrain` command prints JSON; on a non-zero exit it carries an `error` field.
+If `codebrain` isn't found, say the plugin's CLI isn't built or installed: run `npm run build` in the checkout, then update the installed plugin (see "After changing the code" in the README). Then stop. Every `codebrain` command prints JSON; on a non-zero exit it carries an `error` field.
 
 Run `codebrain due --limit 10`. If it fails, show the error and stop; if it says the repository isn't connected, suggest `/codebrain:connect`. If `due` is empty, say nothing is due in one line and stop.
 

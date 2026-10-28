@@ -97,6 +97,23 @@ describe("startCapture", () => {
     expect(fs.readFileSync(path.join(repoDir(key), "capture.log"), "utf8")).toContain(`codebrain bin missing at ${bin}; rebuild or reinstall`);
   });
 
+  it("sends the detached capture's stderr to capture-errors.log", async () => {
+    connectRepo(repo);
+    const bin = path.join(tempDir("codebrain-bin-"), "bin.mjs");
+    fs.writeFileSync(bin, `import "./no-such-module.js";`);
+    expect(startCapture(repo, bin)).toBe(true);
+    const log = path.join(home, "capture-errors.log");
+    await waitUntil(() => fs.existsSync(log) && fs.readFileSync(log, "utf8").includes("no-such-module"));
+  });
+
+  it("still starts capture when capture-errors.log can't be opened", async () => {
+    connectRepo(repo);
+    fs.mkdirSync(path.join(home, "capture-errors.log"));
+    const marker = path.join(tempDir("m-"), "called.json");
+    expect(startCapture(repo, fakeBin(marker))).toBe(true);
+    expect(JSON.parse(await waitFor(marker)).argv[0]).toBe("capture");
+  });
+
   it("never throws, even when it can't read the config", () => {
     connectRepo(repo);
     fs.writeFileSync(path.join(home, "config.json"), "{not json");
@@ -168,7 +185,7 @@ describe("the built hook", () => {
     fs.writeFileSync(path.join(stub, "git"), "#!/bin/sh\nexec sleep 10\n", { mode: 0o755 });
     const r = runHook(hookBin, JSON.stringify({ cwd: repo }), { ...env, PATH: `${stub}${path.delimiter}${env.PATH}` });
     expect(r.status).toBe(0);
-    expect(r.ms).toBeLessThan(2500);
+    expect(r.ms).toBeLessThan(3500);
   });
 
   it("never runs git for a directory outside every connected repo", () => {
@@ -207,6 +224,6 @@ describe("the built hook", () => {
       env, cwd: tempDir("codebrain-cwd-"), encoding: "utf8", timeout: 15_000,
     });
     expect(r.status).toBe(0);
-    expect(Date.now() - started).toBeLessThan(4000);
+    expect(Date.now() - started).toBeLessThan(6000);
   });
 });

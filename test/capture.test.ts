@@ -1,9 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { runCapture, type CaptureOptions, type CaptureState } from "../src/capture.js";
+import { runCapture, type CaptureOptions } from "../src/capture.js";
 import { ClaudeEnvError, ClaudeLimitError, ClaudeResultError, type RunClaude } from "../src/generate.js";
-import { acquireLock, cardPath, connectRepo, listCards, readCard, readState, repoDir, writeCard, writeState } from "../src/store.js";
+import { acquireLock, cardPath, connectRepo, listCards, readCard, readState, repoDir, writeCard, writeState, type RepoState } from "../src/store.js";
 import { commit, makeRepo, sh, useTempHome } from "./helpers.js";
 
 // Pass-through mocks with hooks, so tests can count calls and act at precise moments.
@@ -241,30 +241,30 @@ describe("runCapture", () => {
     const before = readState(key);
     const run = failing(() => new ClaudeEnvError("claude failed (API error 401): Invalid API key · Fix external API key"));
     for (let i = 0; i < 4; i++) expect((await runCapture(key, opts(run))).status).toBe("failed");
-    const after: CaptureState = readState(key);
+    const after: RepoState = readState(key);
     expect(after.lastSha).toBe(before.lastSha);
     expect(after.failures).toBeUndefined();
     expect(after.unavailable).toEqual({ since: "2026-11-02T09:00:00.000Z", message: expect.stringContaining("Invalid API key") });
     expect((await runCapture(key, opts(fake()))).cardsWritten).toBe(1);
-    expect((readState(key) as CaptureState).unavailable).toBeUndefined();
+    expect((readState(key) as RepoState).unavailable).toBeUndefined();
   });
 
   it("clears the unavailable record after any successful claude call, even a skipped merge", async () => {
     await runCapture(key, opts(fake()));
     commit(repo, { "src/ref.ts": FILE }, "feat: referral codes");
     await runCapture(key, opts(failing(() => new ClaudeEnvError("offline"))));
-    expect((readState(key) as CaptureState).unavailable?.message).toBe("offline");
+    expect((readState(key) as RepoState).unavailable?.message).toBe("offline");
     await runCapture(key, opts(async () => "no idea"));
-    expect((readState(key) as CaptureState).unavailable).toBeUndefined();
+    expect((readState(key) as RepoState).unavailable).toBeUndefined();
   });
 
   it("clears the unavailable record when claude ran but failed the merge (a strike)", async () => {
     await runCapture(key, opts(fake()));
     const sha = commit(repo, { "src/ref.ts": FILE }, "feat: referral codes");
     await runCapture(key, opts(failing(() => new ClaudeEnvError("offline"))));
-    expect((readState(key) as CaptureState).unavailable?.message).toBe("offline");
+    expect((readState(key) as RepoState).unavailable?.message).toBe("offline");
     expect((await runCapture(key, opts(failing()))).status).toBe("failed");
-    const after: CaptureState = readState(key);
+    const after: RepoState = readState(key);
     expect(after.failures).toEqual({ sha, count: 1 });
     expect(after.unavailable).toBeUndefined();
   });
@@ -275,7 +275,7 @@ describe("runCapture", () => {
     await runCapture(key, opts(failing(() => new ClaudeEnvError("offline"))));
     const run = failing(() => new ClaudeResultError("error_max_budget_usd", "claude returned an error (error_max_budget_usd)"));
     expect(await runCapture(key, opts(run))).toMatchObject({ status: "done", skipped: 1 });
-    expect((readState(key) as CaptureState).unavailable).toBeUndefined();
+    expect((readState(key) as RepoState).unavailable).toBeUndefined();
   });
 
   it("does nothing, quietly, when the repo path is gone", async () => {

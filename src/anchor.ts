@@ -1,14 +1,14 @@
 /**
  * Anchors tie a card to the block of code it describes. The fingerprint is a
- * hash of the block's trimmed, non-blank lines, and checkAnchor looks for that
+ * hash of the block's trimmed, non-blank lines, and locateAnchor looks for that
  * block anywhere in the file at a later revision.
  *
  * Known limit (v1, by design): if a block appears more than once in a file,
- * the anchor stays fresh while any copy is unchanged, even if the copy the
- * card was written about has changed.
+ * the anchor stays fresh while any copy is unchanged (locateAnchor picks the copy
+ * nearest the old lines), even if the copy the card was written about has changed.
  */
 import { createHash } from "node:crypto";
-import type { Anchor, AnchorStatus } from "./format.js";
+import type { Anchor } from "./format.js";
 import { fileAt } from "./git.js";
 
 /** A block needs at least this many letters, digits or underscores (any script) to be worth anchoring. */
@@ -77,11 +77,6 @@ export function makeAnchor(repo: string, commit: string, path: string, startLine
     commit, path, symbol: symbol && hasSymbol(content, symbol) ? symbol : null,
     startLine: start, endLine: end, lines: block.length, fingerprint: fingerprintOf(block), status: "fresh",
   };
-}
-
-/** Whether the anchored block still exists anywhere in the file at `rev`. */
-export function checkAnchor(repo: string, rev: string, anchor: Anchor): AnchorStatus {
-  return locateAnchor(fileAt(repo, rev, anchor.path), anchor).status;
 }
 
 /** Where an anchored block is in a file: fresh with its current line range, or changed, or orphaned. */
