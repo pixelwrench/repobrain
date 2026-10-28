@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { parseCard, serializeCard, type Card } from "./format.js";
-import { repoRoots, toplevel, type GitOptions } from "./git.js";
+import { repoRoots, type GitOptions } from "./git.js";
 
 export interface RepoConfig {
   path: string;
@@ -94,9 +94,11 @@ export function repoKey(absPath: string): string {
   return `${safe}-${createHash("sha256").update(absPath).digest("hex").slice(0, 6)}`;
 }
 
+/** Connects the repo `dir` is in; from a linked worktree, that's the main repo, so every worktree shares its cards. */
 export function connectRepo(dir: string, areaDepth = 3): string {
-  const top = toplevel(dir);
-  if (!top) throw new Error(`${dir} is not inside a git repository`);
+  const roots = repoRoots(dir);
+  if (!roots) throw new Error(`${dir} is not inside a git repository`);
+  const top = roots.main;
   const config = loadConfig();
   const key = repoKey(top);
   config.repos[key] = { path: top, areaDepth };

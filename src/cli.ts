@@ -3,7 +3,7 @@ import path from "node:path";
 import { parseArgs } from "node:util";
 import { findSymbolLines, makeAnchor } from "./anchor.js";
 import { runCapture, type CaptureReport } from "./capture.js";
-import { LETTERS, type AnchorStatus, type Card, type CardBody, type CardStatus } from "./format.js";
+import { areaOf, LETTERS, type Anchor, type AnchorStatus, type Card, type CardBody, type CardStatus } from "./format.js";
 import type { RunClaude } from "./generate.js";
 import { defaultBranch, fileAt, resolveCommit } from "./git.js";
 import { dueCards, loadSchedule, recordGrade, type Grade } from "./schedule.js";
@@ -38,6 +38,8 @@ export interface WeekCard {
   status: CardStatus;
   anchor: AnchorStatus;
   path: string;
+  startLine: number;
+  endLine: number;
   symbol: string | null;
   body: BodyOutput;
 }
@@ -62,12 +64,16 @@ export interface WeekOutput {
 export type CurateOutput =
   | { id: string; status: "kept" | "dropped"; reanchored: false }
   | { id: string; status: "kept"; reanchored: true; path: string; startLine: number; endLine: number };
+/** A due card's question only: Claude Code shows command output to the user, so answers come from `answer`. */
+export type DueBody = { kind: "mcq"; question: string; choices: string[] } | { kind: "flashcard"; front: string };
 export interface DueCard {
   id: string;
   area: string;
   path: string;
+  startLine: number;
+  endLine: number;
   codeChanged: boolean;
-  body: BodyOutput;
+  body: DueBody;
 }
 export interface DueOutput {
   due: DueCard[];
@@ -95,10 +101,28 @@ export interface StatsOutput {
 export interface CardOutput {
   path: string;
 }
+/** A kept card's answer, asked for once the user has answered. */
+export type AnswerOutput = { id: string; kind: "mcq"; correct: string; explanation: string } | { id: string; kind: "flashcard"; back: string };
+export interface ShowOutput {
+  id: string;
+  status: CardStatus;
+  anchor: AnchorStatus;
+  /** The card's stored anchor. */
+  path: string;
+  startLine: number;
+  endLine: number;
+  /**
+   * The block at the default branch's head: the stored range, moved with the symbol's line when the
+   * symbol is still there. `lines` is null when the file is gone at head.
+   */
+  atHead: { commit: string; startLine: number; endLine: number; lines: string | null };
+  /** The block as the card was written against it; `lines` is null if that commit or file can't be read. */
+  atCommit: { commit: string; lines: string | null };
+}
 
 export type CliOutput =
   | ErrorOutput | CurateUnreadable | ConnectOutput | CaptureOutput | WeekOutput | CurateOutput
-  | DueOutput | GradeOutput | StatsOutput | CardOutput;
+  | DueOutput | GradeOutput | StatsOutput | CardOutput | AnswerOutput | ShowOutput;
 
 export interface CliResult {
   /** 0 on success, 1 on a failure, 2 on bad arguments. */
@@ -112,7 +136,8 @@ export interface CliDeps {
   run?: RunClaude;
 }
 
-const USAGE = "usage: codebrain <connect|capture|week|curate|due|grade|stats|card> [--repo <path>]";
+const USAGE = "usage: codebrain <connect|capture|week|curate|show|due|answer|grade|stats|card> [--repo <path>]";
+const CURATE_USAGE = "usage: codebrain curate <id> keep|fix|drop, or curate <id> fix --path P --lines S-E [--symbol X|--no-symbol]";
 const DECISIONS = ["keep", "fix", "drop"] as const;
 type Decision = (typeof DECISIONS)[number];
 const GRADES = ["right", "wrong", "didnt-know"];
@@ -124,6 +149,11 @@ const message = (e: unknown): string => (e instanceof Error ? e.message : String
 const badId = (id: string): CliResult => usage(`invalid card id ${JSON.stringify(id)}`);
 const noCard = (id: string): CliResult => fail(`no card ${id} in this repository`);
 
+/** The question side only, so printing it never shows the answer. */
+function questionOf(body: CardBody): DueBody {
+  return body.kind === "mcq" ? { kind: "mcq", question: body.question, choices: body.choices } : { kind: "flashcard", front: body.front };
+}
+
 function bodyOutput(body: CardBody): BodyOutput {
   return body.kind === "mcq" ? { ...body, correct: LETTERS[body.correctChoice] } : body;
 }
@@ -134,12 +164,31 @@ function count(value: string | undefined): number | undefined | null {
   return /^\d+$/.test(value) && Number(value) >= 1 ? Number(value) : null;
 }
 
-function connected(repo: string | undefined): { key: string; repoPath: string } {
+function connected(repo: string | undefined): { key: string; repoPath: string; areaDepth: number } {
   const dir = path.resolve(repo ?? process.cwd());
   const found = findRepo(dir);
   if (!found) throw new Error(`${dir} is not connected to CodeBrain; run \`codebrain connect\` there first`);
-  return { key: found.key, repoPath: found.config.path };
+  return { key: found.key, repoPath: found.config.path, areaDepth: found.config.areaDepth };
 }
+
+/** A relative path inside the repo with no `..`, normalised; null when unsafe. */
+function repoRelativePath(p: string): string | null {
+  if (!p || p.includes("\\") || p.includes("\0") || path.posix.isAbsolute(p)) return null;
+  if (p.split("/").includes("..")) return null;
+  const normal = path.posix.normalize(p);
+  return normal === "." || normal.endsWith("/") ? null : normal;
+}
+
+/** "S-E" with positive integers and S <= E, or null. */
+function lineRange(s: string): { start: number; end: number } | null {
+  const m = /^(\d+)-(\d+)$/.exec(s);
+  if (!m) return null;
+  const [start, end] = [Number(m[1]), Number(m[2])];
+  return start >= 1 && start <= end ? { start, end } : null;
+}
+
+const blockText = (content: string | null, start: number, end: number): string | null =>
+  content === null ? null : content.split("\n").slice(start - 1, end).join("\n");
 
 /** Capture runs detached, so its errors go to a log: the repo's capture.log, or the home-level one when no repo resolves. */
 function logCaptureError(key: string | null, dir: string, msg: string): void {
@@ -180,19 +229,37 @@ function nearest(lines: number[], to: number): number | null {
  * With a symbol, the range moves with the symbol's line (the occurrence nearest the old block),
  * so lines inserted above don't shift the card onto other code; a symbol gone at head is a failure.
  */
-function reanchor(repoPath: string, card: Card) {
+function reanchor(repoPath: string, card: Card): Anchor | null {
+  const tip = defaultHead(repoPath);
+  if (!tip) return null;
+  const at = locate(repoPath, card.anchor, tip.head);
+  if (at.symbolMissing) return null;
+  const a = card.anchor;
+  return makeAnchor(repoPath, tip.head, a.path, at.startLine, at.endLine, a.symbol);
+}
+
+/** The default branch and the commit at its tip, or null when there is none. */
+function defaultHead(repoPath: string): { branch: string; head: string } | null {
   const branch = defaultBranch(repoPath);
   const head = branch && resolveCommit(repoPath, branch);
-  if (!head) return null;
-  const a = card.anchor;
+  return branch && head ? { branch, head } : null;
+}
+
+/**
+ * Where an anchor's block is at `head`: its range moved with the symbol's line (the occurrence
+ * nearest the old one), or the same range when it has no symbol or the symbol is gone at head.
+ */
+function locate(repoPath: string, a: Anchor, head: string) {
+  const content = fileAt(repoPath, head, a.path);
   let shift = 0;
+  let symbolMissing = false;
   if (a.symbol) {
     const oldLine = nearest(findSymbolLines(fileAt(repoPath, a.commit, a.path), a.symbol), a.startLine) ?? a.startLine;
-    const newLine = nearest(findSymbolLines(fileAt(repoPath, head, a.path), a.symbol), oldLine);
-    if (newLine === null) return null;
-    shift = newLine - oldLine;
+    const newLine = nearest(findSymbolLines(content, a.symbol), oldLine);
+    if (newLine === null) symbolMissing = true;
+    else shift = newLine - oldLine;
   }
-  return makeAnchor(repoPath, head, a.path, a.startLine + shift, a.endLine + shift, a.symbol);
+  return { content, startLine: a.startLine + shift, endLine: a.endLine + shift, symbolMissing };
 }
 
 export async function main(argv: string[], deps: CliDeps = {}): Promise<CliResult> {
@@ -218,6 +285,10 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
         limit: { type: "string" },
         "area-depth": { type: "string" },
         "no-fetch": { type: "boolean" },
+        path: { type: "string" },
+        lines: { type: "string" },
+        symbol: { type: "string" },
+        "no-symbol": { type: "boolean" },
       },
     });
   } catch (e) {
@@ -261,7 +332,10 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
         const groups = (areas[c.area] ??= []);
         let group = groups.find((g) => g.merge === c.merge);
         if (!group) groups.push((group = { merge: c.merge, title: c.mergeTitle, cards: [] }));
-        group.cards.push({ id: c.id, status: c.status, anchor: c.anchor.status, path: c.anchor.path, symbol: c.anchor.symbol, body: bodyOutput(c.body) });
+        group.cards.push({
+          id: c.id, status: c.status, anchor: c.anchor.status, path: c.anchor.path, startLine: c.anchor.startLine, endLine: c.anchor.endLine,
+          symbol: c.anchor.symbol, body: bodyOutput(c.body),
+        });
       }
       const out: WeekOutput = {
         drafts: items.filter((c) => c.status === "draft").length, flagged: items.filter((c) => c.status === "kept").length, areas, unreadable,
@@ -271,9 +345,21 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
     }
     case "curate": {
       const [id, decision] = positionals as [string?, Decision?];
-      if (!id || !decision || !DECISIONS.includes(decision) || positionals.length > 2) return usage("usage: codebrain curate <id> keep|fix|drop");
+      if (!id || !decision || !DECISIONS.includes(decision) || positionals.length > 2) return usage(CURATE_USAGE);
       if (!isSafeId(id)) return badId(id);
-      const { key, repoPath } = connected(values.repo);
+      const repoint = values.path !== undefined || values.lines !== undefined || values.symbol !== undefined || values["no-symbol"] === true;
+      let target: { path: string; start: number; end: number } | null = null;
+      if (repoint) {
+        if (decision !== "fix") return usage(`--path, --lines and --symbol only go with fix; ${CURATE_USAGE}`);
+        if (values.path === undefined || values.lines === undefined) return usage(`fix re-points with both --path P and --lines S-E; ${CURATE_USAGE}`);
+        if (values.symbol !== undefined && values["no-symbol"]) return usage("use --symbol or --no-symbol, not both");
+        const p = repoRelativePath(values.path);
+        if (p === null) return usage("--path must be a relative path inside the repository, with no ..");
+        const range = lineRange(values.lines);
+        if (range === null) return usage("--lines must be S-E with positive integers and S <= E");
+        target = { path: p, ...range };
+      }
+      const { key, repoPath, areaDepth } = connected(values.repo);
       const found = lookupCard(key, id);
       if ("missing" in found) return noCard(id);
       if ("reason" in found) {
@@ -283,13 +369,31 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
         return { code: 1, out };
       }
       const card = found.card;
+      if (target) {
+        if (!(card.status === "draft" || (card.status === "kept" && card.anchor.status !== "fresh"))) {
+          const state = card.status === "kept" ? "kept and fresh" : card.status;
+          return fail(`card ${id} is ${state}; only drafts and kept cards whose code changed or was removed can be re-pointed`);
+        }
+        const tip = defaultHead(repoPath);
+        if (!tip) return fail(`can't re-point ${id}: the repository has no default branch with commits`);
+        const symbol = values["no-symbol"] ? null : (values.symbol ?? card.anchor.symbol);
+        const moved = makeAnchor(repoPath, tip.head, target.path, target.start, target.end, symbol);
+        if (!moved) {
+          return fail(
+            `can't anchor ${id} at ${target.path}:${target.start}-${target.end} on ${tip.branch}: the file is missing there, or those lines are out of range or too trivial`,
+          );
+        }
+        writeCard(key, { ...card, status: "kept", area: areaOf(moved.path, areaDepth), anchor: moved });
+        appendJsonl(key, "curation.jsonl", { card: id, decision, at: now().toISOString() });
+        return ok({ id, status: "kept", reanchored: true, path: moved.path, startLine: moved.startLine, endLine: moved.endLine } satisfies CurateOutput);
+      }
       let out: CurateOutput = { id, status: decision === "drop" ? "dropped" : "kept", reanchored: false };
       let anchor = card.anchor;
       if (decision !== "drop") {
-        if (card.anchor.status === "orphaned") return fail(`the code for ${id} was removed; drop it or fix its anchor`);
+        if (card.anchor.status === "orphaned") return fail(`the code for ${id} was removed; drop it, or re-point it with \`curate ${id} fix --path P --lines S-E\``);
         if (card.status === "kept" && card.anchor.status === "changed") {
           const moved = reanchor(repoPath, card);
-          if (!moved) return fail(`can't re-anchor ${id}: fix the card or drop it`);
+          if (!moved) return fail(`can't re-anchor ${id}: re-point it with \`curate ${id} fix --path P --lines S-E\`, or drop it`);
           anchor = moved;
           out = { id, status: "kept", reanchored: true, path: moved.path, startLine: moved.startLine, endLine: moved.endLine };
         }
@@ -304,7 +408,10 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
       const { key } = connected(values.repo);
       const due = dueCards(listCardsReport(key).cards, loadSchedule(key), now()).slice(0, limit ?? 10);
       const out: DueOutput = {
-        due: due.map((c) => ({ id: c.id, area: c.area, path: c.anchor.path, codeChanged: c.anchor.status === "changed", body: bodyOutput(c.body) })),
+        due: due.map((c) => ({
+          id: c.id, area: c.area, path: c.anchor.path, startLine: c.anchor.startLine, endLine: c.anchor.endLine,
+          codeChanged: c.anchor.status === "changed", body: questionOf(c.body),
+        })),
       };
       return ok(out);
     }
@@ -338,6 +445,41 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
         unreadable,
         ...stateStatus(key),
       };
+      return ok(out);
+    }
+    case "show": {
+      const id = positionals[0];
+      if (!id || positionals.length > 1) return usage("usage: codebrain show <id>");
+      if (!isSafeId(id)) return badId(id);
+      const { key, repoPath } = connected(values.repo);
+      const found = lookupCard(key, id);
+      if ("missing" in found) return noCard(id);
+      if ("reason" in found) return fail(`card ${id} can't be read: ${found.reason}`);
+      const { card } = found;
+      const a = card.anchor;
+      const tip = defaultHead(repoPath);
+      if (!tip) return fail(`can't show ${id}: the repository has no default branch with commits`);
+      const at = locate(repoPath, a, tip.head);
+      const out: ShowOutput = {
+        id, status: card.status, anchor: a.status, path: a.path, startLine: a.startLine, endLine: a.endLine,
+        atHead: { commit: tip.head, startLine: at.startLine, endLine: at.endLine, lines: blockText(at.content, at.startLine, at.endLine) },
+        atCommit: { commit: a.commit, lines: blockText(fileAt(repoPath, a.commit, a.path), a.startLine, a.endLine) },
+      };
+      return ok(out);
+    }
+    case "answer": {
+      const id = positionals[0];
+      if (!id || positionals.length > 1) return usage("usage: codebrain answer <id>");
+      if (!isSafeId(id)) return badId(id);
+      const { key } = connected(values.repo);
+      const found = lookupCard(key, id);
+      if ("missing" in found) return noCard(id);
+      if ("reason" in found) return fail(`card ${id} can't be read: ${found.reason}`);
+      const { card } = found;
+      if (card.status !== "kept") return fail(`card ${id} is ${card.status}; answers are only given for kept cards`);
+      const b = card.body;
+      const out: AnswerOutput =
+        b.kind === "mcq" ? { id, kind: "mcq", correct: LETTERS[b.correctChoice], explanation: b.explanation } : { id, kind: "flashcard", back: b.back };
       return ok(out);
     }
     case "card": {

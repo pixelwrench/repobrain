@@ -2,7 +2,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { main, type CurateUnreadable, type DueOutput, type StatsOutput, type WeekOutput } from "../src/cli.js";
+import { main, type CurateUnreadable, type DueOutput, type ShowOutput, type StatsOutput, type WeekOutput } from "../src/cli.js";
 import { LETTERS, type Card } from "../src/format.js";
 import type { RunClaude } from "../src/generate.js";
 import { cardPath, home, listCards, readCard, readJsonl, readState, repoDir, writeCard, writeState } from "../src/store.js";
@@ -62,11 +62,6 @@ describe("cli", () => {
   });
 
   describe("output shapes", () => {
-    const mcqBody = (c: Card) => {
-      if (c.body.kind !== "mcq") throw new Error("not mcq");
-      return { ...c.body, correct: LETTERS[c.body.correctChoice] };
-    };
-
     it("gives week cards their anchor, and mcq answers as a letter", async () => {
       const key = await connectAndCapture();
       const mcq = byKind(key, "mcq");
@@ -75,28 +70,51 @@ describe("cli", () => {
       expect(mcq.body.choices[mcq.body.correctChoice]).toBe("null");
       const cards = ((await cli("week")).out as WeekOutput).areas["src"][0].cards;
       expect(cards.find((c) => c.id === mcq.id)).toEqual({
-        id: mcq.id, status: "draft", anchor: "fresh", path: "src/ref.ts", symbol: "applyReferral",
+        id: mcq.id, status: "draft", anchor: "fresh", path: "src/ref.ts", startLine: 1, endLine: 5, symbol: "applyReferral",
         body: {
           kind: "mcq", question: "What does applyReferral return for an unknown code?", choices: mcq.body.choices,
           correctChoice: mcq.body.correctChoice, correct: LETTERS[mcq.body.correctChoice], explanation: "It returns null when lookup finds nothing.",
         },
       });
       expect(cards.find((c) => c.id === flash.id)).toEqual({
-        id: flash.id, status: "draft", anchor: "fresh", path: "src/ref.ts", symbol: "lookup",
+        id: flash.id, status: "draft", anchor: "fresh", path: "src/ref.ts", startLine: 2, endLine: 4, symbol: "lookup",
         body: { kind: "flashcard", front: "Where are referral codes looked up?", back: "`lookup`, called by `applyReferral`" },
       });
     });
 
-    it("gives due cards their area and whether their code changed", async () => {
+    it("gives due cards their area and whether their code changed, and never their answers", async () => {
       const key = await connectAndCapture();
       const mcq = keep(key, byKind(key, "mcq"), { status: "changed" });
       const flash = keep(key, byKind(key, "flashcard"));
-      const due = ((await cli("due")).out as DueOutput).due;
-      expect(due.find((d) => d.id === mcq.id)).toEqual({ id: mcq.id, area: "src", path: "src/ref.ts", codeChanged: true, body: mcqBody(mcq) });
-      expect(due.find((d) => d.id === flash.id)).toEqual({
-        id: flash.id, area: "src", path: "src/ref.ts", codeChanged: false,
-        body: { kind: "flashcard", front: "Where are referral codes looked up?", back: "`lookup`, called by `applyReferral`" },
+      if (mcq.body.kind !== "mcq") throw new Error("not mcq");
+      const out = (await cli("due")).out as DueOutput;
+      expect(out.due.find((d) => d.id === mcq.id)).toEqual({
+        id: mcq.id, area: "src", path: "src/ref.ts", startLine: 1, endLine: 5, codeChanged: true,
+        body: { kind: "mcq", question: "What does applyReferral return for an unknown code?", choices: mcq.body.choices },
       });
+      expect(out.due.find((d) => d.id === flash.id)).toEqual({
+        id: flash.id, area: "src", path: "src/ref.ts", startLine: 2, endLine: 4, codeChanged: false,
+        body: { kind: "flashcard", front: "Where are referral codes looked up?" },
+      });
+      const printed = JSON.stringify(out);
+      for (const secret of ["explanation", "correct", "back", "It returns null when lookup finds nothing.", "called by"]) expect(printed).not.toContain(secret);
+    });
+
+    it("gives a kept card's answer only through answer", async () => {
+      const key = await connectAndCapture();
+      const mcq = byKind(key, "mcq");
+      const flash = byKind(key, "flashcard");
+      if (mcq.body.kind !== "mcq") throw new Error("not mcq");
+      expect(await cli("answer", mcq.id)).toMatchObject({ code: 1, out: { error: expect.stringMatching(/draft/) } });
+      keep(key, mcq);
+      keep(key, flash);
+      expect(await cli("answer", mcq.id)).toEqual({
+        code: 0, out: { id: mcq.id, kind: "mcq", correct: LETTERS[mcq.body.correctChoice], explanation: "It returns null when lookup finds nothing." },
+      });
+      expect(await cli("answer", flash.id)).toEqual({ code: 0, out: { id: flash.id, kind: "flashcard", back: "`lookup`, called by `applyReferral`" } });
+      expect(await cli("answer", "deadbeef00-9")).toEqual({ code: 1, out: { error: "no card deadbeef00-9 in this repository" } });
+      expect((await cli("answer", "../x")).code).toBe(2);
+      expect((await cli("answer")).code).toBe(2);
     });
   });
 
@@ -183,7 +201,7 @@ describe("cli", () => {
       const card = keep(key, byKind(key, "mcq"), { status: "changed" });
       commit(repo, { "src/ref.ts": FILE.replace("applyReferral", "redeemReferral") }, "refactor: rename");
       const before = fs.readFileSync(cardPath(key, card.id), "utf8");
-      expect(await cli("curate", card.id, "keep")).toEqual({ code: 1, out: { error: `can't re-anchor ${card.id}: fix the card or drop it` } });
+      expect(await cli("curate", card.id, "keep")).toEqual({ code: 1, out: { error: `can't re-anchor ${card.id}: re-point it with \`curate ${card.id} fix --path P --lines S-E\`, or drop it` } });
       expect(fs.readFileSync(cardPath(key, card.id), "utf8")).toBe(before);
     });
 
@@ -203,7 +221,7 @@ describe("cli", () => {
       expect(card.anchor.startLine).toBeGreaterThan(1);
       commit(repo, { "src/ref.ts": "x\n" }, "refactor: shrink");
       const before = fs.readFileSync(cardPath(key, card.id), "utf8");
-      expect(await cli("curate", card.id, "fix")).toEqual({ code: 1, out: { error: `can't re-anchor ${card.id}: fix the card or drop it` } });
+      expect(await cli("curate", card.id, "fix")).toEqual({ code: 1, out: { error: `can't re-anchor ${card.id}: re-point it with \`curate ${card.id} fix --path P --lines S-E\`, or drop it` } });
       expect(fs.readFileSync(cardPath(key, card.id), "utf8")).toBe(before);
       expect(readJsonl(key, "curation.jsonl")).toEqual([]);
     });
@@ -212,7 +230,7 @@ describe("cli", () => {
       const key = await connectAndCapture();
       const card = keep(key, byKind(key, "mcq"), { status: "orphaned" });
       for (const decision of ["keep", "fix"]) {
-        expect(await cli("curate", card.id, decision)).toEqual({ code: 1, out: { error: `the code for ${card.id} was removed; drop it or fix its anchor` } });
+        expect(await cli("curate", card.id, decision)).toEqual({ code: 1, out: { error: `the code for ${card.id} was removed; drop it, or re-point it with \`curate ${card.id} fix --path P --lines S-E\`` } });
       }
       expect(readCard(key, card.id)).toEqual(card);
       expect((await cli("curate", card.id, "drop")).out).toMatchObject({ status: "dropped" });
@@ -265,6 +283,125 @@ describe("cli", () => {
     const week = await main(["week", "--repo", wt], { now, run });
     expect(week.code).toBe(0);
     expect((week.out as WeekOutput).drafts).toBe(2);
+  });
+
+  describe("show", () => {
+    const BLOCK = FILE.split("\n").slice(0, 5).join("\n");
+
+    it("returns the anchored block's code at the default branch's head", async () => {
+      const key = await connectAndCapture();
+      const card = byKind(key, "mcq");
+      const head = sh(repo, ["rev-parse", "master"]);
+      expect(await cli("show", card.id)).toEqual({
+        code: 0,
+        out: { id: card.id, status: "draft", anchor: "fresh", path: "src/ref.ts", startLine: 1, endLine: 5, atHead: { commit: head, startLine: 1, endLine: 5, lines: BLOCK },
+          atCommit: { commit: card.anchor.commit, lines: BLOCK },
+        } satisfies ShowOutput,
+      });
+    });
+
+    it("follows the symbol at head, and falls back to the same lines without one", async () => {
+      const key = await connectAndCapture();
+      const card = byKind(key, "mcq");
+      const changed = FILE.replace("return null", "return undefined");
+      const head = commit(repo, { "src/ref.ts": "// one\n// two\n// three\n" + changed }, "fix: undefined");
+      const shown = (await cli("show", card.id)).out as ShowOutput;
+      expect(shown.atHead).toEqual({ commit: head, startLine: 4, endLine: 8, lines: changed.split("\n").slice(0, 5).join("\n") });
+      expect(shown.atCommit).toEqual({ commit: card.anchor.commit, lines: FILE.split("\n").slice(0, 5).join("\n") });
+      writeCard(key, { ...card, anchor: { ...card.anchor, symbol: null } });
+      expect(((await cli("show", card.id)).out as ShowOutput).atHead).toEqual({
+        commit: head, startLine: 1, endLine: 5, lines: ["// one", "// two", "// three", "export function applyReferral(code: string) {", "  const ref = lookup(code);"].join("\n"),
+      });
+      // A symbol gone at head also falls back to the same lines.
+      commit(repo, { "src/ref.ts": FILE.replace("applyReferral", "redeemReferral") }, "refactor: rename");
+      expect(((await cli("show", byKind(key, "flashcard").id)).out as ShowOutput).atHead).toMatchObject({ startLine: 2, endLine: 4 });
+    });
+
+    it("gives null lines when the file is gone at head, and errors for unknown or bad ids", async () => {
+      const key = await connectAndCapture();
+      const card = byKind(key, "mcq");
+      commit(repo, { "src/ref.ts": null, "README.md": "x\n" }, "chore: remove");
+      const shown = (await cli("show", card.id)).out as ShowOutput;
+      expect(shown.atHead.lines).toBeNull();
+      expect(shown.atCommit.lines).toBe(FILE.split("\n").slice(0, 5).join("\n"));
+      expect(await cli("show", "deadbeef00-9")).toEqual({ code: 1, out: { error: "no card deadbeef00-9 in this repository" } });
+      expect((await cli("show", "../x")).code).toBe(2);
+      expect((await cli("show")).code).toBe(2);
+    });
+  });
+
+  describe("re-pointing a card with fix --path --lines", () => {
+    it("re-points a kept, changed card at the given lines", async () => {
+      const key = await connectAndCapture();
+      const card = keep(key, byKind(key, "flashcard"), { status: "changed" });
+      const head = commit(repo, { "src/ref.ts": "// moved down\n\n" + FILE }, "docs: comment");
+      expect(await cli("curate", card.id, "fix", "--path", "src/ref.ts", "--lines", "4-6")).toEqual({
+        code: 0, out: { id: card.id, status: "kept", reanchored: true, path: "src/ref.ts", startLine: 4, endLine: 6 },
+      });
+      expect(readCard(key, card.id)).toMatchObject({ status: "kept", anchor: { commit: head, path: "src/ref.ts", startLine: 4, endLine: 6, symbol: "lookup", status: "fresh" } });
+      expect(readJsonl(key, "curation.jsonl")).toEqual([{ card: card.id, decision: "fix", at: "2026-11-02T09:00:00.000Z" }]);
+    });
+
+    it("re-points an orphaned card at a moved file, and takes the area from the new path", async () => {
+      const key = await connectAndCapture();
+      const card = keep(key, byKind(key, "mcq"), { status: "orphaned" });
+      const head = commit(repo, { "src/ref.ts": null, "lib/referrals/ref.ts": FILE }, "refactor: move");
+      expect((await cli("curate", card.id, "fix", "--path", "lib/referrals/ref.ts", "--lines", "1-5", "--no-symbol")).out).toEqual({
+        id: card.id, status: "kept", reanchored: true, path: "lib/referrals/ref.ts", startLine: 1, endLine: 5,
+      });
+      expect(readCard(key, card.id)).toMatchObject({
+        area: "lib/referrals", anchor: { commit: head, path: "lib/referrals/ref.ts", symbol: null, status: "fresh" },
+      });
+    });
+
+    it("re-points a draft, with an explicit symbol, and keeps it", async () => {
+      const key = await connectAndCapture();
+      const card = byKind(key, "mcq");
+      expect((await cli("curate", card.id, "fix", "--path", "src/ref.ts", "--lines", "3-4", "--symbol", "discount")).out).toMatchObject({ reanchored: true, startLine: 3, endLine: 4 });
+      expect(readCard(key, card.id)).toMatchObject({ status: "kept", anchor: { startLine: 3, endLine: 4, symbol: "discount" } });
+    });
+
+    it("rejects a bad range or path with code 2, and leaves the card alone", async () => {
+      const key = await connectAndCapture();
+      const card = byKind(key, "mcq");
+      const before = fs.readFileSync(cardPath(key, card.id), "utf8");
+      const fix = (...flags: string[]) => cli("curate", card.id, "fix", ...flags);
+      for (const lines of ["5-2", "0-3", "a-b", "3", "1-2-3", ""]) {
+        expect(await fix("--path", "src/ref.ts", "--lines", lines)).toEqual({ code: 2, out: { error: "--lines must be S-E with positive integers and S <= E" } });
+      }
+      for (const p of ["../x.ts", "/etc/hosts", "src/../../x.ts", "", ".", "src\\ref.ts"]) {
+        expect(await fix("--path", p, "--lines", "1-5")).toEqual({ code: 2, out: { error: "--path must be a relative path inside the repository, with no .." } });
+      }
+      expect((await fix("--path", "src/ref.ts")).code).toBe(2);
+      expect((await fix("--lines", "1-5")).code).toBe(2);
+      expect((await fix("--path", "src/ref.ts", "--lines", "1-5", "--symbol", "x", "--no-symbol")).code).toBe(2);
+      expect((await cli("curate", card.id, "keep", "--path", "src/ref.ts", "--lines", "1-5")).code).toBe(2);
+      expect(fs.readFileSync(cardPath(key, card.id), "utf8")).toBe(before);
+    });
+
+    it("returns code 1 when the code there can't hold an anchor, or the card can't be re-pointed", async () => {
+      const key = await connectAndCapture();
+      const card = byKind(key, "mcq");
+      const before = fs.readFileSync(cardPath(key, card.id), "utf8");
+      expect(await cli("curate", card.id, "fix", "--path", "src/ref.ts", "--lines", "50-60")).toEqual({
+        code: 1, out: { error: `can't anchor ${card.id} at src/ref.ts:50-60 on master: the file is missing there, or those lines are out of range or too trivial` },
+      });
+      expect((await cli("curate", card.id, "fix", "--path", "src/nope.ts", "--lines", "1-5")).code).toBe(1);
+      expect(fs.readFileSync(cardPath(key, card.id), "utf8")).toBe(before);
+      const fresh = keep(key, card);
+      expect(await cli("curate", fresh.id, "fix", "--path", "src/ref.ts", "--lines", "1-5")).toEqual({
+        code: 1, out: { error: `card ${card.id} is kept and fresh; only drafts and kept cards whose code changed or was removed can be re-pointed` },
+      });
+      writeCard(key, { ...card, status: "dropped" });
+      expect((await cli("curate", card.id, "fix", "--path", "src/ref.ts", "--lines", "1-5")).code).toBe(1);
+    });
+  });
+
+  it("connects the main repo from a linked worktree", async () => {
+    const wt = path.join(tempDir("codebrain-wt-"), "feat");
+    sh(repo, ["worktree", "add", "-q", "-b", "feat", wt]);
+    const fromWt = (await main(["connect", "--repo", wt], { now, run })).out as { connected: string };
+    expect(fromWt.connected).toBe(((await cli("connect")).out as { connected: string }).connected);
   });
 
   it("limits due cards", async () => {
