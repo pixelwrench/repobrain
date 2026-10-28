@@ -124,9 +124,11 @@ export function commitDiff(repo: string, sha: string, excludes: string[], maxByt
   }
 }
 
+/** A file's content at `rev`, or null when the path is missing, empty or not a file (a directory, say). */
 export function fileAt(repo: string, rev: string, path: string): string | null {
+  if (path === "") return null;
   try {
-    return git(repo, ["show", `${rev}:${path}`]);
+    return git(repo, ["cat-file", "blob", `${rev}:${path}`]);
   } catch {
     return null;
   }

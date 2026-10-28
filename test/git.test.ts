@@ -181,6 +181,13 @@ describe("git helpers", () => {
     expect(fileAt(repo, "HEAD", "src/missing.txt")).toBeNull();
   });
 
+  it("returns null for a directory or an empty path", () => {
+    const repo = makeRepo();
+    commit(repo, { "src/a.txt": "one\n" }, "first");
+    expect(fileAt(repo, "HEAD", "src")).toBeNull();
+    expect(fileAt(repo, "HEAD", "")).toBeNull();
+  });
+
   it("finds the top level of a repo, or null outside one", () => {
     const repo = makeRepo();
     commit(repo, { "src/a.txt": "a\n" }, "first");
