@@ -48,6 +48,36 @@ describe("dueCards and recordGrade", () => {
     expect(dueCards(cards, sched, t0).map((c) => c.id)).toEqual(["new"]);
   });
 
+  it("puts overdue reviews before new cards, most overdue first, new cards in listing order", () => {
+    const old = nextState(undefined, "right", new Date("2026-10-20T09:00:00Z"));
+    const recent = nextState(undefined, "right", new Date("2026-10-25T09:00:00Z"));
+    const cards = [card("new1"), card("recent"), card("new2"), card("old")];
+    expect(dueCards(cards, { old, recent }, t0).map((c) => c.id)).toEqual(["old", "recent", "new1", "new2"]);
+  });
+
+  it("counts a card due exactly now as due", () => {
+    const s = nextState(undefined, "right", t0);
+    expect(dueCards([card("a")], { a: s }, s.due).map((c) => c.id)).toEqual(["a"]);
+    expect(dueCards([card("a")], { a: s }, new Date(s.due.getTime() - 1))).toEqual([]);
+  });
+
+  it("treats ids like constructor as new, not prototype members", () => {
+    expect(dueCards([card("constructor"), card("toString")], {}, t0).map((c) => c.id)).toEqual(["constructor", "toString"]);
+  });
+
+  it("round-trips three grades through recordGrade to the in-memory chain", () => {
+    const repo = makeRepo();
+    commit(repo, { "a.txt": "a\n" }, "first");
+    const key = connectRepo(repo);
+    const a = nextState(undefined, "right", t0);
+    const b = nextState(a, "right", a.due);
+    const c = nextState(b, "wrong", b.due);
+    recordGrade(key, "one", "right", t0);
+    recordGrade(key, "one", "right", a.due);
+    recordGrade(key, "one", "wrong", b.due);
+    expect(loadSchedule(key).one).toEqual(c);
+  });
+
   it("persists grades and logs reviews", () => {
     const repo = makeRepo();
     commit(repo, { "a.txt": "a\n" }, "first");
