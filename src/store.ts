@@ -23,6 +23,9 @@ export interface RepoState {
 
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
+/** Whether `id` is a safe card or repo id: no path separators, no leading dot. */
+export const isSafeId = (id: string): boolean => SAFE_ID.test(id);
+
 function checkId(kind: string, id: string): string {
   if (!SAFE_ID.test(id)) throw new Error(`codebrain: invalid ${kind} ${JSON.stringify(id)}`);
   return id;
