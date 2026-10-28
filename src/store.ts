@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -17,33 +17,68 @@ export interface RepoState {
   updatedAt: string | null;
 }
 
+const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+function checkId(kind: string, id: string): string {
+  if (!SAFE_ID.test(id)) throw new Error(`codebrain: invalid ${kind} ${JSON.stringify(id)}`);
+  return id;
+}
+
+const isEnoent = (e: unknown): boolean => (e as NodeJS.ErrnoException).code === "ENOENT";
+
 export function home(): string {
   return process.env.CODEBRAIN_HOME ?? path.join(os.homedir(), ".codebrain");
 }
 const configPath = (): string => path.join(home(), "config.json");
-export const repoDir = (key: string): string => path.join(home(), "repos", key);
+export const repoDir = (key: string): string => path.join(home(), "repos", checkId("repo key", key));
 
 function readJson<T>(file: string, fallback: T): T {
+  let text: string;
   try {
-    return JSON.parse(fs.readFileSync(file, "utf8")) as T;
+    text = fs.readFileSync(file, "utf8");
+  } catch (e) {
+    if (isEnoent(e)) return fallback;
+    throw e;
+  }
+  try {
+    return JSON.parse(text) as T;
   } catch {
-    return fallback;
+    throw new Error(`codebrain: ${file} is not valid JSON; fix or delete it`);
+  }
+}
+
+/** Writes via a temp file in the same directory, then renames over the target. */
+export function writeFileAtomic(file: string, data: string): void {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    fs.writeFileSync(tmp, data);
+    fs.renameSync(tmp, file);
+  } catch (e) {
+    fs.rmSync(tmp, { force: true });
+    throw e;
   }
 }
 
 function writeJson(file: string, value: unknown): void {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const tmp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(value, null, 2) + "\n");
-  fs.renameSync(tmp, file);
+  writeFileAtomic(file, JSON.stringify(value, null, 2) + "\n");
 }
 
+const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+
 export function loadConfig(): Config {
-  return readJson<Config>(configPath(), { repos: {} });
+  const file = configPath();
+  const raw = readJson<unknown>(file, {});
+  if (!isObject(raw) || (raw.repos !== undefined && !isObject(raw.repos))) {
+    throw new Error(`codebrain: ${file} is not a valid config; fix or delete it`);
+  }
+  return { ...raw, repos: (raw.repos ?? {}) as Record<string, RepoConfig> };
 }
 
 export function repoKey(absPath: string): string {
-  return `${path.basename(absPath)}-${createHash("sha256").update(absPath).digest("hex").slice(0, 6)}`;
+  const name = path.basename(absPath).replace(/[^A-Za-z0-9._-]/g, "_");
+  const safe = /^[A-Za-z0-9]/.test(name) ? name : `repo${name}`;
+  return `${safe}-${createHash("sha256").update(absPath).digest("hex").slice(0, 6)}`;
 }
 
 export function connectRepo(dir: string, areaDepth = 3): string {
@@ -73,16 +108,16 @@ export function writeState(key: string, state: RepoState): void {
   writeJson(path.join(repoDir(key), "state.json"), state);
 }
 
-export const cardPath = (key: string, id: string): string => path.join(repoDir(key), "cards", `${id}.md`);
+export const cardPath = (key: string, id: string): string => path.join(repoDir(key), "cards", `${checkId("card id", id)}.md`);
 
 export function writeCard(key: string, card: Card): void {
-  const file = cardPath(key, card.id);
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, serializeCard(card));
+  writeFileAtomic(cardPath(key, card.id), serializeCard(card));
 }
 
 export function readCard(key: string, id: string): Card {
-  return parseCard(fs.readFileSync(cardPath(key, id), "utf8"));
+  const card = parseCard(fs.readFileSync(cardPath(key, id), "utf8"));
+  if (card.id !== id) throw new Error(`codebrain: card file ${id}.md holds card ${JSON.stringify(card.id)}`);
+  return card;
 }
 
 export function listCards(key: string): Card[] {
@@ -102,25 +137,92 @@ export function listCards(key: string): Card[] {
     });
 }
 
-/** Returns a release function, or null if another capture holds a fresh lock. */
-export function acquireLock(key: string, staleMs = 15 * 60_000): (() => void) | null {
+export interface Lock {
+  /** Deletes the lock file, but only if it still holds this lock's token. */
+  release(): void;
+  /** Touches the lock's mtime so it doesn't go stale; a no-op if the lock is no longer ours. */
+  refresh(): void;
+}
+
+function readOrNull(file: string): string | null {
+  try {
+    return fs.readFileSync(file, "utf8");
+  } catch (e) {
+    if (isEnoent(e)) return null;
+    throw e;
+  }
+}
+
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/**
+ * Takes the per-repo capture lock. Returns null if another live process holds a lock
+ * newer than staleMs. A lock whose holder pid is dead, or that is older than staleMs, is reclaimed.
+ */
+export function acquireLock(key: string, staleMs = 15 * 60_000): Lock | null {
   const file = path.join(repoDir(key), "capture.lock");
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  for (let attempt = 0; attempt < 2; attempt++) {
+  const token = `${process.pid}:${randomUUID()}`;
+  const ours = (): boolean => readOrNull(file) === token;
+  const lock: Lock = {
+    release: () => {
+      if (ours()) fs.rmSync(file, { force: true });
+    },
+    refresh: () => {
+      if (ours()) {
+        const now = new Date();
+        fs.utimesSync(file, now, now);
+      }
+    },
+  };
+
+  for (let attempt = 0; attempt < 5; attempt++) {
     try {
-      fs.writeFileSync(file, String(process.pid), { flag: "wx" });
-      return () => fs.rmSync(file, { force: true });
+      fs.writeFileSync(file, token, { flag: "wx" });
+      return lock;
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-      let age = Infinity;
-      try {
-        age = Date.now() - fs.statSync(file).mtimeMs;
-      } catch {
-        // removed between the write and the stat: retry
-      }
-      if (age < staleMs) return null;
-      fs.rmSync(file, { force: true });
     }
+    let held: string;
+    let mtimeMs: number;
+    try {
+      held = fs.readFileSync(file, "utf8");
+      mtimeMs = fs.statSync(file).mtimeMs;
+    } catch (e) {
+      if (isEnoent(e)) continue; // released meanwhile: retry wx
+      throw e;
+    }
+    const pid = Number.parseInt(held.split(":")[0] ?? "", 10);
+    // An unreadable pid (e.g. a holder mid-write) counts as alive; only age can reclaim it.
+    const alive = Number.isNaN(pid) || pidAlive(pid);
+    if (alive && Date.now() - mtimeMs < staleMs) return null;
+
+    // Rename is atomic, so only one reclaimer moves the stale lock aside.
+    const aside = `${file}.${process.pid}.${randomUUID()}.stale`;
+    try {
+      fs.renameSync(file, aside);
+    } catch (e) {
+      if (isEnoent(e)) continue; // another reclaimer won: retry wx
+      throw e;
+    }
+    // If a new holder replaced the lock between our read and rename, put theirs back.
+    if (fs.readFileSync(aside, "utf8") !== held) {
+      try {
+        fs.linkSync(aside, file);
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+      }
+      fs.rmSync(aside, { force: true });
+      return null;
+    }
+    fs.rmSync(aside, { force: true });
   }
   return null;
 }
@@ -136,13 +238,14 @@ export function appendJsonl(key: string, file: string, value: unknown): void {
 }
 
 export function readJsonl<T = unknown>(key: string, file: string): T[] {
-  try {
-    return fs
-      .readFileSync(path.join(repoDir(key), file), "utf8")
-      .split("\n")
-      .filter(Boolean)
-      .map((l) => JSON.parse(l) as T);
-  } catch {
-    return [];
-  }
+  const text = readOrNull(path.join(repoDir(key), file));
+  if (text === null) return [];
+  return text.split("\n").flatMap((line) => {
+    if (!line.trim()) return [];
+    try {
+      return [JSON.parse(line) as T];
+    } catch {
+      return [];
+    }
+  });
 }
