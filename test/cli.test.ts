@@ -294,7 +294,7 @@ describe("cli", () => {
       const head = sh(repo, ["rev-parse", "master"]);
       expect(await cli("show", card.id)).toEqual({
         code: 0,
-        out: { id: card.id, status: "draft", anchor: "fresh", path: "src/ref.ts", startLine: 1, endLine: 5, atHead: { commit: head, startLine: 1, endLine: 5, lines: BLOCK },
+        out: { id: card.id, status: "draft", anchor: "fresh", path: "src/ref.ts", startLine: 1, endLine: 5, atHead: { commit: head, startLine: 1, endLine: 5, symbolFound: true, lines: BLOCK },
           atCommit: { commit: card.anchor.commit, lines: BLOCK },
         } satisfies ShowOutput,
       });
@@ -306,15 +306,25 @@ describe("cli", () => {
       const changed = FILE.replace("return null", "return undefined");
       const head = commit(repo, { "src/ref.ts": "// one\n// two\n// three\n" + changed }, "fix: undefined");
       const shown = (await cli("show", card.id)).out as ShowOutput;
-      expect(shown.atHead).toEqual({ commit: head, startLine: 4, endLine: 8, lines: changed.split("\n").slice(0, 5).join("\n") });
+      expect(shown.atHead).toEqual({ commit: head, startLine: 4, endLine: 8, symbolFound: true, lines: changed.split("\n").slice(0, 5).join("\n") });
       expect(shown.atCommit).toEqual({ commit: card.anchor.commit, lines: FILE.split("\n").slice(0, 5).join("\n") });
       writeCard(key, { ...card, anchor: { ...card.anchor, symbol: null } });
       expect(((await cli("show", card.id)).out as ShowOutput).atHead).toEqual({
-        commit: head, startLine: 1, endLine: 5, lines: ["// one", "// two", "// three", "export function applyReferral(code: string) {", "  const ref = lookup(code);"].join("\n"),
+        commit: head, startLine: 1, endLine: 5, symbolFound: false, lines: ["// one", "// two", "// three", "export function applyReferral(code: string) {", "  const ref = lookup(code);"].join("\n"),
       });
       // A symbol gone at head also falls back to the same lines.
-      commit(repo, { "src/ref.ts": FILE.replace("applyReferral", "redeemReferral") }, "refactor: rename");
-      expect(((await cli("show", byKind(key, "flashcard").id)).out as ShowOutput).atHead).toMatchObject({ startLine: 2, endLine: 4 });
+      commit(repo, { "src/ref.ts": FILE.replace("lookup", "findReferral") }, "refactor: rename");
+      expect(((await cli("show", byKind(key, "flashcard").id)).out as ShowOutput).atHead).toMatchObject({ startLine: 2, endLine: 4, symbolFound: false });
+    });
+
+    it("clamps the range at head to the file's last line", async () => {
+      const key = await connectAndCapture();
+      const card = byKind(key, "mcq");
+      const short = FILE.split("\n").slice(0, 3).join("\n") + "\n";
+      commit(repo, { "src/ref.ts": short }, "refactor: shorter");
+      expect(((await cli("show", card.id)).out as ShowOutput).atHead).toMatchObject({
+        startLine: 1, endLine: 3, symbolFound: true, lines: short.trimEnd(),
+      });
     });
 
     it("gives null lines when the file is gone at head, and errors for unknown or bad ids", async () => {
@@ -322,7 +332,7 @@ describe("cli", () => {
       const card = byKind(key, "mcq");
       commit(repo, { "src/ref.ts": null, "README.md": "x\n" }, "chore: remove");
       const shown = (await cli("show", card.id)).out as ShowOutput;
-      expect(shown.atHead.lines).toBeNull();
+      expect(shown.atHead).toMatchObject({ lines: null, symbolFound: false });
       expect(shown.atCommit.lines).toBe(FILE.split("\n").slice(0, 5).join("\n"));
       expect(await cli("show", "deadbeef00-9")).toEqual({ code: 1, out: { error: "no card deadbeef00-9 in this repository" } });
       expect((await cli("show", "../x")).code).toBe(2);
@@ -388,12 +398,32 @@ describe("cli", () => {
       });
       expect((await cli("curate", card.id, "fix", "--path", "src/nope.ts", "--lines", "1-5")).code).toBe(1);
       expect(fs.readFileSync(cardPath(key, card.id), "utf8")).toBe(before);
-      const fresh = keep(key, card);
-      expect(await cli("curate", fresh.id, "fix", "--path", "src/ref.ts", "--lines", "1-5")).toEqual({
-        code: 1, out: { error: `card ${card.id} is kept and fresh; only drafts and kept cards whose code changed or was removed can be re-pointed` },
-      });
       writeCard(key, { ...card, status: "dropped" });
-      expect((await cli("curate", card.id, "fix", "--path", "src/ref.ts", "--lines", "1-5")).code).toBe(1);
+      expect(await cli("curate", card.id, "fix", "--path", "src/ref.ts", "--lines", "1-5")).toEqual({
+        code: 1, out: { error: `card ${card.id} is dropped; only cards that aren't dropped can be re-pointed` },
+      });
+    });
+
+    it("re-points a fresh kept card, such as one a re-anchor put on the wrong code", async () => {
+      const key = await connectAndCapture();
+      const card = keep(key, byKind(key, "mcq"));
+      expect((await cli("curate", card.id, "fix", "--path", "src/ref.ts", "--lines", "3-4", "--symbol", "discount")).out).toEqual({
+        id: card.id, status: "kept", reanchored: true, path: "src/ref.ts", startLine: 3, endLine: 4,
+      });
+      expect(readCard(key, card.id).anchor).toMatchObject({ startLine: 3, endLine: 4, symbol: "discount", status: "fresh" });
+    });
+
+    it("refuses an explicit --symbol that isn't in the file at head, and leaves the card alone", async () => {
+      const key = await connectAndCapture();
+      const card = byKind(key, "mcq");
+      const before = fs.readFileSync(cardPath(key, card.id), "utf8");
+      for (const symbol of ["redeemReferral", "lookupTable", "apply"]) {
+        expect(await cli("curate", card.id, "fix", "--path", "src/ref.ts", "--lines", "1-5", "--symbol", symbol)).toEqual({
+          code: 1, out: { error: `symbol ${symbol} not found in src/ref.ts at HEAD` },
+        });
+      }
+      expect(fs.readFileSync(cardPath(key, card.id), "utf8")).toBe(before);
+      expect(readJsonl(key, "curation.jsonl")).toEqual([]);
     });
   });
 

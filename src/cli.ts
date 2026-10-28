@@ -113,9 +113,10 @@ export interface ShowOutput {
   endLine: number;
   /**
    * The block at the default branch's head: the stored range, moved with the symbol's line when the
-   * symbol is still there. `lines` is null when the file is gone at head.
+   * symbol is still there, and clamped to the file's last line. `symbolFound` is false when the card
+   * has no symbol or it's gone at head, so the range is only a guess. `lines` is null when the file is gone.
    */
-  atHead: { commit: string; startLine: number; endLine: number; lines: string | null };
+  atHead: { commit: string; startLine: number; endLine: number; symbolFound: boolean; lines: string | null };
   /** The block as the card was written against it; `lines` is null if that commit or file can't be read. */
   atCommit: { commit: string; lines: string | null };
 }
@@ -370,12 +371,17 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
       }
       const card = found.card;
       if (target) {
-        if (!(card.status === "draft" || (card.status === "kept" && card.anchor.status !== "fresh"))) {
-          const state = card.status === "kept" ? "kept and fresh" : card.status;
-          return fail(`card ${id} is ${state}; only drafts and kept cards whose code changed or was removed can be re-pointed`);
-        }
+        // Any live card, fresh ones included: a re-anchor can land on the wrong code.
+        if (card.status === "dropped") return fail(`card ${id} is dropped; only cards that aren't dropped can be re-pointed`);
         const tip = defaultHead(repoPath);
         if (!tip) return fail(`can't re-point ${id}: the repository has no default branch with commits`);
+        if (values.symbol !== undefined) {
+          const content = fileAt(repoPath, tip.head, target.path);
+          // makeAnchor would quietly drop a symbol it can't find; an explicit one must be there.
+          if (content !== null && findSymbolLines(content, values.symbol).length === 0) {
+            return fail(`symbol ${values.symbol} not found in ${target.path} at HEAD`);
+          }
+        }
         const symbol = values["no-symbol"] ? null : (values.symbol ?? card.anchor.symbol);
         const moved = makeAnchor(repoPath, tip.head, target.path, target.start, target.end, symbol);
         if (!moved) {
@@ -460,9 +466,17 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
       const tip = defaultHead(repoPath);
       if (!tip) return fail(`can't show ${id}: the repository has no default branch with commits`);
       const at = locate(repoPath, a, tip.head);
+      let { startLine, endLine } = at;
+      if (at.content !== null) {
+        const all = at.content.split("\n");
+        const lastLine = Math.max(1, at.content.endsWith("\n") ? all.length - 1 : all.length);
+        startLine = Math.min(startLine, lastLine);
+        endLine = Math.max(startLine, Math.min(endLine, lastLine));
+      }
+      const symbolFound = a.symbol !== null && at.content !== null && !at.symbolMissing;
       const out: ShowOutput = {
         id, status: card.status, anchor: a.status, path: a.path, startLine: a.startLine, endLine: a.endLine,
-        atHead: { commit: tip.head, startLine: at.startLine, endLine: at.endLine, lines: blockText(at.content, at.startLine, at.endLine) },
+        atHead: { commit: tip.head, startLine, endLine, symbolFound, lines: blockText(at.content, startLine, endLine) },
         atCommit: { commit: a.commit, lines: blockText(fileAt(repoPath, a.commit, a.path), a.startLine, a.endLine) },
       };
       return ok(out);

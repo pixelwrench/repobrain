@@ -20,10 +20,10 @@ Otherwise go area by area (the keys of `areas`), change by change (each group's 
 
 ## Flagged cards (`status: "kept"`)
 
-- `anchor: "changed"`: run `codebrain show <id>`, show `atCommit.lines` (the code the card was written against) next to `atHead.lines` (the code on the default branch now), and say whether the card still holds. Then ask keep, fix or drop. Keep and fix re-anchor the card: when curate returns `reanchored: true`, tell the user it now points at `path` lines `startLine`-`endLine` so they can check. If curate says it can't re-anchor, re-point it (below) or drop it.
+- `anchor: "changed"`: run `codebrain show <id>`, show `atCommit.lines` (the code the card was written against) next to `atHead.lines` (the code on the default branch now), and say whether the card still holds. If `atHead.symbolFound` is false, say the code shown from the default branch is the same line range, not located by symbol, so it may not be the same code. Then ask keep, fix or drop. Keep and fix re-anchor the card: when curate returns `reanchored: true`, tell the user it now points at `path` lines `startLine`-`endLine` so they can check; if they say that's the wrong code, re-point it (below). If curate says it can't re-anchor, re-point it (below) or drop it.
 - `anchor: "orphaned"`: the code was removed. Drop it, or re-point it if the code moved.
 
-To re-point: find where the code now lives on the default branch, confirm the file and lines with the user, then run `codebrain curate <id> fix --path P --lines S-E`, adding `--symbol X` if the symbol was renamed or `--no-symbol` if it no longer has one. If the card text no longer matches the code, fix the text as above.
+To re-point: find where the code now lives on the default branch, confirm the file and lines with the user, then run `codebrain curate <id> fix --path P --lines S-E`, adding `--symbol X` if the symbol was renamed or `--no-symbol` if it no longer has one. If the card text also needs fixing, Edit the text first (as above, without running `curate <id> fix` on its own), then run the single re-point command.
 
 ## Repairing a card file
 
