@@ -12,6 +12,22 @@ export type RunClaude = (prompt: string, stdin: string) => Promise<string>;
 /** The model's reply had no usable JSON array. Capture skips the merge rather than retrying it forever. */
 export class ModelOutputError extends Error {}
 
+/** claude ran and reported a failed result (is_error, or a subtype other than success), such as a budget overrun. */
+export class ClaudeResultError extends Error {
+  constructor(
+    readonly subtype: string,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+/** claude hit one of CodeBrain's limits: the timeout or the output cap. */
+export class ClaudeLimitError extends Error {}
+
+/** claude couldn't run properly: not installed, logged out, offline, killed, or no result at all. Not the merge's fault. */
+export class ClaudeEnvError extends Error {}
+
 export const MAX_CARDS = 5;
 
 const DEFAULT_TIMEOUT_MS = 180_000;
@@ -84,18 +100,31 @@ function childEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
-function parseResult(out: string): string {
+interface ResultJson {
+  result?: unknown;
+  is_error?: unknown;
+  subtype?: unknown;
+}
+
+/** claude's result object from its --output-format json stdout, or null when there is none. */
+function resultJson(out: string): ResultJson | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(out);
   } catch {
-    throw new Error(`unparseable claude output: ${out.slice(0, 500)}`);
+    return null;
   }
-  const res = (Array.isArray(parsed) ? parsed[parsed.length - 1] : parsed) as { result?: unknown; is_error?: unknown; subtype?: unknown } | null;
-  if (!res || typeof res !== "object" || res.is_error !== false || res.subtype !== "success" || typeof res.result !== "string") {
-    throw new Error(`claude returned an error: ${out.slice(0, 500)}`);
-  }
-  return res.result;
+  const res = Array.isArray(parsed) ? parsed[parsed.length - 1] : parsed;
+  if (!res || typeof res !== "object" || Array.isArray(res)) return null;
+  const r = res as ResultJson;
+  return typeof r.subtype === "string" || typeof r.is_error === "boolean" ? r : null;
+}
+
+/** The reply text from a result object; throws ClaudeResultError for a failed result. */
+function resultText(res: ResultJson, out: string): string {
+  if (res.is_error === false && res.subtype === "success" && typeof res.result === "string") return res.result;
+  const subtype = typeof res.subtype === "string" ? res.subtype : "unknown";
+  throw new ClaudeResultError(subtype, `claude returned an error (${subtype}): ${out.slice(0, 500)}`);
 }
 
 /**
@@ -140,7 +169,7 @@ export function createRunClaude(opts: { timeoutMs?: number; closeGraceMs?: numbe
       const fail = (e: Error) => settle(() => reject(e));
       const timer = setTimeout(() => {
         killGroup();
-        fail(new Error(`claude timed out after ${timeoutMs}ms: ${err.slice(0, 500)}`));
+        fail(new ClaudeLimitError(`claude timed out after ${timeoutMs}ms: ${err.slice(0, 500)}`));
       }, timeoutMs);
 
       child.stdout.setEncoding("utf8");
@@ -149,26 +178,37 @@ export function createRunClaude(opts: { timeoutMs?: number; closeGraceMs?: numbe
         out += d;
         if (out.length > MAX_STDOUT_CHARS) {
           killGroup();
-          fail(new Error(`claude wrote too much output (over ${MAX_STDOUT_CHARS} characters)`));
+          fail(new ClaudeLimitError(`claude wrote too much output (over ${MAX_STDOUT_CHARS} characters)`));
         }
       });
       child.stderr.on("data", (d: string) => {
         if (err.length < 10_000) err += d;
       });
-      child.on("error", fail);
+      child.on("error", (e) => fail(new ClaudeEnvError(`could not run claude: ${e.message}`)));
       // EPIPE if claude exits before reading stdin; "exit" then reports the outcome.
       child.stdin.on("error", () => {});
 
       const finish = () => {
         if (!exit) return;
         const { code, signal } = exit;
-        if (signal) return fail(new Error(`claude killed by ${signal}: ${err.slice(0, 500)}`));
-        if (code !== 0) {
+        if (signal) return fail(new ClaudeEnvError(`claude killed by ${signal}: ${err.slice(0, 500)}`));
+        // claude reports failures such as a budget overrun as result JSON on stdout, even when it exits non-zero.
+        const res = resultJson(out);
+        if (code !== 0 && (res === null || (res.is_error === false && res.subtype === "success"))) {
           const hint = AUTH_ERROR.test(err) ? " (if your Claude auth is set in settings.json, set CODEBRAIN_SETTING_SOURCES=user)" : "";
-          return fail(new Error(`claude exited ${code}${hint}: ${err.slice(0, 500)}`));
+          return fail(new ClaudeEnvError(`claude exited ${code}${hint}: ${(err || out).slice(0, 500)}`));
+        }
+        if (res === null) {
+          let parses = true;
+          try {
+            JSON.parse(out);
+          } catch {
+            parses = false;
+          }
+          return fail(new ClaudeEnvError(`${parses ? "claude returned no result" : "unparseable claude output"}: ${out.slice(0, 500)}`));
         }
         try {
-          const result = parseResult(out);
+          const result = resultText(res, out);
           settle(() => resolve(result));
         } catch (e) {
           fail(e as Error);

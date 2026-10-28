@@ -2,8 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { anchorStatusIn } from "./anchor.js";
 import type { AnchorStatus, Card } from "./format.js";
-import { draftCards, ModelOutputError, runClaude, type RunClaude } from "./generate.js";
-import { commitDiff, defaultBranch, fetchQuietly, fileAt, firstParentCommits, git, isAncestor, mergeBase, resolveCommit } from "./git.js";
+import { ClaudeLimitError, ClaudeResultError, draftCards, ModelOutputError, runClaude, type RunClaude } from "./generate.js";
+import { commitDiff, defaultBranch, fetchQuietly, fileAt, firstParentCommits, git, isAncestor, mergeBase, resolveCommit, toplevel } from "./git.js";
 import { diffPaths, filterDiff } from "./guard.js";
 import { acquireLock, appendLog, cardPath, listCards, loadConfig, readCard, readState, writeCard, writeState, type RepoState } from "./store.js";
 
@@ -19,8 +19,6 @@ const DEFAULT_MAX_DIFF_BYTES = 60_000;
 const MAX_FAILURES = 3;
 /** How many recently processed merges the state file remembers. */
 const MAX_PROCESSED = 500;
-/** claude's result subtype when --max-budget-usd stopped it; generate includes the raw result in its error. */
-const OVER_BUDGET = /error_max_budget/;
 
 export interface CaptureOptions {
   /** Most merges drafted per run (default 5); the rest wait for the next run. */
@@ -108,6 +106,10 @@ async function capture(key: string, opts: CaptureOptions): Promise<CaptureReport
   const now = opts.now ?? (() => new Date());
   const maxDiffBytes = opts.maxDiffBytes ?? DEFAULT_MAX_DIFF_BYTES;
   try {
+    if (toplevel(repo.path) === null) {
+      appendLog(key, `repo path ${repo.path} is gone or not a git repo; nothing to capture`);
+      return report;
+    }
     if (opts.fetch ?? true) fetchQuietly(repo.path);
     const branch = defaultBranch(repo.path);
     if (branch === null) {
@@ -196,9 +198,14 @@ async function capture(key: string, opts: CaptureOptions): Promise<CaptureReport
           continue;
         }
         // Retrying a merge that hit the budget would spend the same again for nothing.
-        if (OVER_BUDGET.test(msg)) {
+        if (e instanceof ClaudeResultError && e.subtype === "error_max_budget_usd") {
           skip(`over budget: ${msg.slice(0, 200)}`);
           continue;
+        }
+        if (!(e instanceof ClaudeResultError || e instanceof ClaudeLimitError)) {
+          // claude missing, logged out, offline or similar: not this merge's fault, so no strike.
+          appendLog(key, `${commit.sha} not drafted, claude unavailable: ${msg}`);
+          return { ...report, status: "failed", error: msg };
         }
         const count = state.failures?.sha === commit.sha ? state.failures.count + 1 : 1;
         if (count >= MAX_FAILURES) {

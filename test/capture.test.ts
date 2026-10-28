@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { runCapture, type CaptureOptions } from "../src/capture.js";
-import type { RunClaude } from "../src/generate.js";
+import { ClaudeEnvError, ClaudeLimitError, ClaudeResultError, type RunClaude } from "../src/generate.js";
 import { acquireLock, cardPath, connectRepo, listCards, readCard, readState, repoDir, writeCard, writeState } from "../src/store.js";
 import { commit, makeRepo, sh, useTempHome } from "./helpers.js";
 
@@ -74,8 +74,8 @@ const fakeThree = (p = "src/ref.ts"): RunClaude => async () =>
     cardFor(p, { front: `Why does ${p} return null?`, startLine: 2, endLine: 4 }),
     cardFor(p, { front: `What does ${p} call to apply a discount?`, startLine: 4, endLine: 4 }),
   ]);
-const failing = (msg = "claude exited 1"): RunClaude => async () => {
-  throw new Error(msg);
+const failing = (make: () => Error = () => new ClaudeLimitError("claude timed out")): RunClaude => async () => {
+  throw make();
 };
 const opts = (run: RunClaude, over: CaptureOptions = {}): CaptureOptions => ({
   fetch: false, run, now: () => new Date("2026-11-02T09:00:00Z"), ...over,
@@ -173,7 +173,7 @@ describe("runCapture", () => {
     expect(await runCapture(key, opts(failing()))).toMatchObject({ status: "done", skipped: 1 });
     expect(readState(key).lastSha).toBe(sha);
     expect(readState(key).failures).toBeUndefined();
-    expect(log()).toContain(`${sha} skipped (failed 3 times: claude exited 1)`);
+    expect(log()).toContain(`${sha} skipped (failed 3 times: claude timed out)`);
   });
 
   it("resets the failure count after a success, and counts a new merge from one", async () => {
@@ -191,10 +191,39 @@ describe("runCapture", () => {
   it("skips a merge at once when claude ran out of budget", async () => {
     await runCapture(key, opts(fake()));
     const sha = commit(repo, { "src/ref.ts": FILE }, "feat: referral codes");
-    const run = failing('claude returned an error: {"type":"result","subtype":"error_max_budget_usd","is_error":true}');
+    const run = failing(() => new ClaudeResultError("error_max_budget_usd", "claude returned an error (error_max_budget_usd)"));
     expect(await runCapture(key, opts(run))).toMatchObject({ status: "done", skipped: 1 });
     expect(readState(key).lastSha).toBe(sha);
     expect(log()).toContain(`${sha} skipped (over budget`);
+  });
+
+  it("counts other claude result errors as strikes", async () => {
+    await runCapture(key, opts(fake()));
+    const sha = commit(repo, { "src/ref.ts": FILE }, "feat: referral codes");
+    const run = failing(() => new ClaudeResultError("error_during_execution", "claude returned an error (error_during_execution)"));
+    expect((await runCapture(key, opts(run))).status).toBe("failed");
+    expect(readState(key).failures).toEqual({ sha, count: 1 });
+  });
+
+  it("never strikes a merge when claude itself is unavailable", async () => {
+    await runCapture(key, opts(fake()));
+    commit(repo, { "src/ref.ts": FILE }, "feat: referral codes");
+    const before = readState(key);
+    const run = failing(() => new ClaudeEnvError("spawn claude ENOENT"));
+    for (let i = 0; i < 4; i++) expect((await runCapture(key, opts(run))).status).toBe("failed");
+    expect(readState(key).lastSha).toBe(before.lastSha);
+    expect(readState(key).failures).toBeUndefined();
+    expect(log()).toContain("claude unavailable: spawn claude ENOENT");
+    expect(listCards(key)).toEqual([]);
+  });
+
+  it("does nothing, quietly, when the repo path is gone", async () => {
+    await runCapture(key, opts(fake()));
+    const before = readState(key);
+    fs.rmSync(repo, { recursive: true, force: true });
+    expect(await runCapture(key, opts(fake()))).toMatchObject({ status: "done", processed: 0 });
+    expect(readState(key)).toEqual(before);
+    expect(log()).toContain(`repo path ${repo} is gone or not a git repo`);
   });
 
   it("re-initialises when the saved commit shares no history with the branch", async () => {

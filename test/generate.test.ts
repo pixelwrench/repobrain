@@ -1,7 +1,19 @@
 import fs from "node:fs";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { buildPrompt, claudeArgs, createRunClaude, draftCards, MAX_CARDS, ModelOutputError, parseRawCards, type DraftInput } from "../src/generate.js";
+import {
+  buildPrompt,
+  ClaudeEnvError,
+  ClaudeLimitError,
+  ClaudeResultError,
+  claudeArgs,
+  createRunClaude,
+  draftCards,
+  MAX_CARDS,
+  ModelOutputError,
+  parseRawCards,
+  type DraftInput,
+} from "../src/generate.js";
 import { commit, makeRepo, tempDir, useTempHome } from "./helpers.js";
 
 const FILE = ["export function applyReferral(code: string) {", "  const ref = lookup(code);", "  if (!ref) return null;", "  return discount(ref);", "}", ""].join("\n");
@@ -222,20 +234,40 @@ describe("runClaude with a fake claude", () => {
   });
 
   it.each([
-    ["a non-zero exit", `echo boom >&2; exit 3`, /exited 3: boom/],
-    ["is_error", `printf '{"subtype":"success","is_error":true,"result":"x"}'`, /returned an error/],
-    ["a null result", `printf '{"subtype":"success","is_error":false,"result":null}'`, /returned an error/],
-    ["a non-success subtype", `printf '{"subtype":"error_max_budget_usd","is_error":false,"result":"x"}'`, /returned an error/],
-    ["non-JSON stdout", `echo hello`, /unparseable/],
-    ["a null document", `echo null`, /returned an error/],
-  ])("rejects %s", async (_name, body, re) => {
+    ["a non-zero exit", `echo boom >&2; exit 3`, ClaudeEnvError, /exited 3: boom/],
+    ["a non-zero exit with non-result JSON", `printf '{"hello":1}'; exit 1`, ClaudeEnvError, /exited 1/],
+    ["death by signal", `kill -9 $$`, ClaudeEnvError, /killed by SIGKILL/],
+    ["is_error", `printf '{"subtype":"success","is_error":true,"result":"x"}'`, ClaudeResultError, /returned an error/],
+    ["a null result", `printf '{"subtype":"success","is_error":false,"result":null}'`, ClaudeResultError, /returned an error/],
+    ["a non-success subtype", `printf '{"subtype":"error_max_budget_usd","is_error":false,"result":"x"}'`, ClaudeResultError, /returned an error/],
+    ["non-JSON stdout", `echo hello`, ClaudeEnvError, /unparseable/],
+    ["a null document", `echo null`, ClaudeEnvError, /no result/],
+  ])("rejects %s", async (_name, body, type, re) => {
     fake(body);
-    await expect(createRunClaude()("p", "s")).rejects.toThrow(re);
+    const e = await createRunClaude()("p", "s").catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(type);
+    expect((e as Error).message).toMatch(re);
+  });
+
+  it("reports a budget overrun that exits 1 with empty stderr as a result error", async () => {
+    fake(`printf '{"type":"result","subtype":"error_max_budget_usd","is_error":true,"total_cost_usd":0.51}'; exit 1`);
+    const e = await createRunClaude()("p", "s").catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(ClaudeResultError);
+    expect((e as ClaudeResultError).subtype).toBe("error_max_budget_usd");
+  });
+
+  it("reports a missing claude binary as an environment error", async () => {
+    process.env.PATH = tempDir("codebrain-nobin-");
+    const e = await createRunClaude()("p", "s").catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(ClaudeEnvError);
+    expect((e as Error).message).toMatch(/ENOENT/);
   });
 
   it("suggests CODEBRAIN_SETTING_SOURCES when claude fails on auth", async () => {
     fake(`echo "Invalid API key - please run /login" >&2; exit 1`);
-    await expect(createRunClaude()("p", "s")).rejects.toThrow(/CODEBRAIN_SETTING_SOURCES=user/);
+    const e = await createRunClaude()("p", "s").catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(ClaudeEnvError);
+    expect((e as Error).message).toMatch(/CODEBRAIN_SETTING_SOURCES=user/);
     fake(`echo boom >&2; exit 1`);
     await expect(createRunClaude()("p", "s")).rejects.toThrow(/^(?!.*CODEBRAIN_SETTING_SOURCES).*boom/s);
   });
@@ -252,7 +284,7 @@ describe("runClaude with a fake claude", () => {
     const marker = path.join(bin, "grandchild-alive");
     fake(`(sleep 2; touch '${marker}') & sleep 30`);
     const started = Date.now();
-    await expect(createRunClaude({ timeoutMs: 300 })("p", "s")).rejects.toThrow(/timed out/);
+    await expect(createRunClaude({ timeoutMs: 300 })("p", "s")).rejects.toThrow(ClaudeLimitError);
     expect(Date.now() - started).toBeLessThan(2000);
     await new Promise((r) => setTimeout(r, 2500));
     expect(fs.existsSync(marker)).toBe(false);
@@ -267,7 +299,7 @@ describe("runClaude with a fake claude", () => {
 
   it("kills and rejects output over the cap", async () => {
     fake(`yes aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`);
-    await expect(createRunClaude({ timeoutMs: 20_000 })("p", "s")).rejects.toThrow(/too much output/);
+    await expect(createRunClaude({ timeoutMs: 20_000 })("p", "s")).rejects.toThrow(ClaudeLimitError);
   });
 
   it("doesn't fail when claude exits without reading stdin", async () => {
