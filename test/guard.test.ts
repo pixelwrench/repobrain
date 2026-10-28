@@ -286,3 +286,40 @@ describe("filterDiff edge cases", () => {
     }
   });
 });
+
+describe("pathological input", () => {
+  // A long run of [A-Za-z0-9_-], such as a base64url blob or a minified bundle.
+  const RUN = Array.from({ length: 60_000 }, (_, i) => "Ab9_-xY3"[i % 8]).join("");
+  const timed = <T>(f: () => T): [T, number] => {
+    const t = performance.now();
+    const out = f();
+    return [out, performance.now() - t];
+  };
+
+  it("scans a repeated token name quickly", () => {
+    const [out, ms] = timed(() => findSecrets("+" + "x_token_".repeat(7500)));
+    expect(out).toEqual([]);
+    expect(ms).toBeLessThan(200);
+  });
+
+  it("scans a 60,000-character identifier run quickly", () => {
+    const [out, ms] = timed(() => findSecrets(RUN));
+    expect(out).toEqual([]);
+    expect(ms).toBeLessThan(200);
+  });
+
+  it("scans URL-scheme-like runs quickly", () => {
+    for (const text of ["a-".repeat(30_000), "a.".repeat(30_000), "a://" + "b".repeat(30_000) + ":" + "c".repeat(30_000)]) {
+      const [out, ms] = timed(() => findSecrets(text));
+      expect(out).toEqual([]);
+      expect(ms).toBeLessThan(200);
+    }
+  });
+
+  it("filters a diff hunk made of that run quickly", () => {
+    const diff = ["diff --git a/dist/app.js b/dist/app.js", "--- a/dist/app.js", "+++ b/dist/app.js", "@@ -1 +1 @@", "+" + RUN, ""].join("\n");
+    const [out, ms] = timed(() => filterDiff(diff));
+    expect(out).toEqual({ diff, droppedHunks: 0, droppedFiles: 0 });
+    expect(ms).toBeLessThan(200);
+  });
+});

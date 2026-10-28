@@ -14,17 +14,20 @@ const SECRET_PATTERNS: { name: string; re: RegExp }[] = [
   { name: "jwt", re: /\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/ },
   {
     name: "assignment",
-    re: /[A-Za-z0-9_-]*(api[_-]?key|secret|token|passw(or)?d|pwd|credential)[A-Za-z0-9_-]*["']?\s*[:=]\s*["'](?!https?:\/\/|\/)[^"'\s]{12,}["']/i,
+    // No leading name prefix and a bounded suffix: unbounded runs on both sides of
+    // the keyword backtrack catastrophically on long identifier-like blobs.
+    re: /(api[_-]?key|secret|token|passw(or)?d|pwd|credential)[A-Za-z0-9_-]{0,40}["']?\s*[:=]\s*["'](?!https?:\/\/|\/)[^"'\s]{12,}["']/i,
   },
   {
     // Unquoted values (.env, YAML, Dockerfile ENV). Not flagged: values that look
     // like code or references (identifiers without digits, dotted property paths,
     // calls, generics, a leading $), or that end in , or ;.
     name: "assignment-unquoted",
-    re: /^[+\- ]?\s*(?:(?:export|ENV)\s+)?[A-Za-z0-9_]*(SECRET|PASSWORD|PASSWD|TOKEN|API_?KEY)[A-Za-z0-9_]*\s*[:=]\s*(?![A-Za-z_]+(?:\s+#.*)?\s*$)(?![A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+(?:\s+#.*)?\s*$)(?!\$)(?:[^\s"'`{}()[\]<>|,;]|[,;](?=[^\s"'`{}()[\]<>|,;])){12,}(?:\s+#.*)?\s*$/im,
+    re: /^[+\- ]?\s*(?:(?:export|ENV)\s+)?[A-Za-z0-9_]{0,40}(SECRET|PASSWORD|PASSWD|TOKEN|API_?KEY)[A-Za-z0-9_]{0,40}\s*[:=]\s*(?![A-Za-z_]+(?:\s+#.*)?\s*$)(?![A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+(?:\s+#.*)?\s*$)(?!\$)(?:[^\s"'`{}()[\]<>|,;]|[,;](?=[^\s"'`{}()[\]<>|,;])){12,}(?:\s+#.*)?\s*$/im,
   },
-  // $ { } excluded from the password so templated URLs aren't flagged.
-  { name: "connection-string", re: /\b[a-z][a-z0-9+.-]*:\/\/[^\s:/@]+:[^\s@/${}]{6,}@/i },
+  // $ { } excluded from the password so templated URLs aren't flagged. Bounded
+  // runs keep long scheme-like text (a-a-a-..., a.a.a....) from backtracking.
+  { name: "connection-string", re: /\b[a-z][a-z0-9+.-]{0,30}:\/\/[^\s:/@]{1,256}:[^\s@/${}]{6,256}@/i },
 ];
 
 export function findSecrets(text: string): string[] {
