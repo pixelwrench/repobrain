@@ -36,7 +36,8 @@ export function home(): string {
 const configPath = (): string => path.join(home(), "config.json");
 export const repoDir = (key: string): string => path.join(home(), "repos", checkId("repo key", key));
 
-function readJson<T>(file: string, fallback: T): T {
+/** Parses a JSON file; returns fallback only when the file is missing, and throws a clear error on corrupt JSON. */
+export function readJson<T>(file: string, fallback: T): T {
   let text: string;
   try {
     text = fs.readFileSync(file, "utf8");
