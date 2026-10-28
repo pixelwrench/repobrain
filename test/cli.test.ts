@@ -5,7 +5,7 @@ import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { main, type CurateUnreadable, type DueOutput, type StatsOutput, type WeekOutput } from "../src/cli.js";
 import { LETTERS, type Card } from "../src/format.js";
 import type { RunClaude } from "../src/generate.js";
-import { cardPath, home, listCards, readCard, readJsonl, repoDir, writeCard } from "../src/store.js";
+import { cardPath, home, listCards, readCard, readJsonl, readState, repoDir, writeCard, writeState } from "../src/store.js";
 import { commit, makeRepo, sh, tempDir, useTempHome } from "./helpers.js";
 
 const FILE = ["export function applyReferral(code: string) {", "  const ref = lookup(code);", "  if (!ref) return null;", "  return discount(ref);", "}", ""].join("\n");
@@ -42,13 +42,13 @@ describe("cli", () => {
     expect(cap).toMatchObject({ code: 0, out: { status: "done", cardsWritten: 2 } });
 
     const week = (await cli("week")).out as WeekOutput;
-    expect(week).toMatchObject({ drafts: 2, flagged: 0, unreadable: [] });
+    expect(week).toMatchObject({ drafts: 2, flagged: 0, unreadable: [], claudeUnavailable: null });
     expect(week.areas["src"][0].title).toBe("feat: referral codes");
     const [first, second] = week.areas["src"][0].cards.map((c) => c.id);
 
     expect((await cli("curate", first, "keep")).out).toEqual({ id: first, status: "kept", reanchored: false });
     expect((await cli("curate", second, "drop")).out).toEqual({ id: second, status: "dropped", reanchored: false });
-    expect((await cli("week")).out).toEqual({ drafts: 0, flagged: 0, areas: {}, unreadable: [] });
+    expect((await cli("week")).out).toEqual({ drafts: 0, flagged: 0, areas: {}, unreadable: [], claudeUnavailable: null });
 
     const due = (await cli("due")).out as DueOutput;
     expect(due.due.map((d) => d.id)).toEqual([first]);
@@ -57,7 +57,7 @@ describe("cli", () => {
 
     expect((await cli("stats")).out).toEqual({
       cards: 2, draft: 0, kept: 1, dropped: 1, changed: 0, orphaned: 0,
-      curated: { keep: 1, fix: 0, drop: 1 }, reviews: 1, right: 1, unreadable: [],
+      curated: { keep: 1, fix: 0, drop: 1 }, reviews: 1, right: 1, unreadable: [], claudeUnavailable: null,
     } satisfies StatsOutput);
   });
 
@@ -135,12 +135,56 @@ describe("cli", () => {
 
       for (const decision of ["keep", "fix"]) {
         if (decision === "fix") writeCard(key, { ...readCard(key, card.id), anchor: { ...card.anchor, status: "changed" } });
-        expect(await cli("curate", card.id, decision)).toEqual({ code: 0, out: { id: card.id, status: "kept", reanchored: true } });
+        expect(await cli("curate", card.id, decision)).toEqual({
+          code: 0, out: { id: card.id, status: "kept", reanchored: true, path: "src/ref.ts", startLine: 1, endLine: 5 },
+        });
         const after = readCard(key, card.id).anchor;
         expect(after).toMatchObject({ commit: head, path: "src/ref.ts", status: "fresh", startLine: 1, endLine: 5 });
         expect(after.fingerprint).not.toBe(card.anchor.fingerprint);
       }
       expect((await cli("week")).out).toMatchObject({ flagged: 0 });
+    });
+
+    const ABOVE = "// one\n// two\n// three\n";
+
+    it("follows the symbol when lines are inserted above the block", async () => {
+      const key = await connectAndCapture();
+      const card = keep(key, byKind(key, "mcq"));
+      expect(card.anchor).toMatchObject({ symbol: "applyReferral", startLine: 1, endLine: 5 });
+      const head = commit(repo, { "src/ref.ts": ABOVE + FILE.replace("return null", "return undefined") }, "fix: undefined");
+      writeCard(key, { ...card, anchor: { ...card.anchor, status: "changed" } });
+      expect(await cli("curate", card.id, "keep")).toEqual({
+        code: 0, out: { id: card.id, status: "kept", reanchored: true, path: "src/ref.ts", startLine: 4, endLine: 8 },
+      });
+      expect(readCard(key, card.id).anchor).toMatchObject({ commit: head, symbol: "applyReferral", startLine: 4, endLine: 8, status: "fresh" });
+    });
+
+    it("takes the occurrence of the symbol nearest the old block", async () => {
+      const key = await connectAndCapture();
+      const card = keep(key, byKind(key, "flashcard"));
+      expect(card.anchor).toMatchObject({ symbol: "lookup", startLine: 2, endLine: 4 });
+      // `lookup` now also appears far below, and in a longer word that isn't a whole-word match.
+      const after = ABOVE + FILE.replace("return null", "return undefined") + "\n".repeat(20) + "// lookupTable, then lookup again\n";
+      commit(repo, { "src/ref.ts": after }, "fix: undefined");
+      writeCard(key, { ...card, anchor: { ...card.anchor, status: "changed" } });
+      expect((await cli("curate", card.id, "keep")).out).toMatchObject({ reanchored: true, startLine: 5, endLine: 7 });
+    });
+
+    it("keeps line-based re-anchoring for a card with no symbol", async () => {
+      const key = await connectAndCapture();
+      const card = keep(key, byKind(key, "mcq"), { symbol: null });
+      commit(repo, { "src/ref.ts": ABOVE + FILE }, "docs: comments");
+      writeCard(key, { ...card, anchor: { ...card.anchor, status: "changed" } });
+      expect((await cli("curate", card.id, "keep")).out).toMatchObject({ reanchored: true, startLine: 1, endLine: 5 });
+    });
+
+    it("refuses when the symbol is gone at head", async () => {
+      const key = await connectAndCapture();
+      const card = keep(key, byKind(key, "mcq"), { status: "changed" });
+      commit(repo, { "src/ref.ts": FILE.replace("applyReferral", "redeemReferral") }, "refactor: rename");
+      const before = fs.readFileSync(cardPath(key, card.id), "utf8");
+      expect(await cli("curate", card.id, "keep")).toEqual({ code: 1, out: { error: `can't re-anchor ${card.id}: fix the card or drop it` } });
+      expect(fs.readFileSync(cardPath(key, card.id), "utf8")).toBe(before);
     });
 
     it("re-anchors against the default branch, not the checked-out branch", async () => {
@@ -193,6 +237,14 @@ describe("cli", () => {
     expect(week.unreadable).toEqual([{ file, error: reason }]);
     expect(week.drafts).toBe(1);
     expect(((await cli("stats")).out as StatsOutput).unreadable).toEqual([{ file, error: reason }]);
+  });
+
+  it("shows in week and stats when capture can't reach claude", async () => {
+    const key = await connectAndCapture();
+    const unavailable = { since: "2026-11-01T08:00:00.000Z", message: "spawn claude ENOENT" };
+    writeState(key, { ...readState(key), unavailable });
+    expect(((await cli("week")).out as WeekOutput).claudeUnavailable).toEqual(unavailable);
+    expect(((await cli("stats")).out as StatsOutput).claudeUnavailable).toEqual(unavailable);
   });
 
   it("limits due cards", async () => {

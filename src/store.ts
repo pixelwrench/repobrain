@@ -19,6 +19,11 @@ export interface RepoState {
   failures?: { sha: string; count: number };
   /** The most recent merges fully handled (cards written or skipped), newest last. Missing in old state files. */
   processed?: string[];
+  /**
+   * The latest environment failure (claude missing, logged out, offline, rate-limited), from when
+   * it began. Capture sets it and any successful claude call clears it; week and stats show it.
+   */
+  unavailable?: { since: string; message: string };
 }
 
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;

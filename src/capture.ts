@@ -33,12 +33,8 @@ export interface CaptureOptions {
   now?: () => Date;
 }
 
-/**
- * The repo state as capture keeps it. `unavailable` records the latest environment failure
- * (claude missing, logged out, offline, rate-limited), from when it began; any successful
- * claude call clears it.
- */
-export type CaptureState = RepoState & { unavailable?: { since: string; message: string } };
+/** The repo state as capture keeps it; an alias kept for callers that imported it from here. */
+export type CaptureState = RepoState;
 
 export interface CaptureReport {
   status: "locked" | "initialized" | "done" | "failed";

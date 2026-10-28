@@ -5,11 +5,11 @@ import { makeAnchor } from "./anchor.js";
 import { runCapture, type CaptureReport } from "./capture.js";
 import { LETTERS, type AnchorStatus, type Card, type CardBody, type CardStatus } from "./format.js";
 import type { RunClaude } from "./generate.js";
-import { defaultBranch, resolveCommit } from "./git.js";
+import { defaultBranch, fileAt, resolveCommit } from "./git.js";
 import { dueCards, loadSchedule, recordGrade, type Grade } from "./schedule.js";
 import {
-  appendJsonl, appendLog, cardPath, connectRepo, findRepo, home, isSafeId, listCardsReport, readCard, readJsonl, writeCard,
-  type CardListing,
+  appendJsonl, appendLog, cardPath, connectRepo, findRepo, home, isSafeId, listCardsReport, readCard, readJsonl, readState, writeCard,
+  type CardListing, type RepoState,
 } from "./store.js";
 
 // ---- Output shapes: every command prints one of these as JSON on stdout. ----
@@ -26,6 +26,8 @@ export interface CurateUnreadable extends ErrorOutput {
 /** A card body as printed: an mcq also carries its answer as a letter, `correct`. */
 export type BodyOutput = Extract<CardBody, { kind: "flashcard" }> | (Extract<CardBody, { kind: "mcq" }> & { correct: string });
 export type UnreadableCard = CardListing["unreadable"][number];
+/** Set while capture can't reach claude (missing, logged out, offline, rate-limited), from when it began. */
+export type ClaudeUnavailable = NonNullable<RepoState["unavailable"]>;
 
 export interface ConnectOutput {
   connected: string;
@@ -52,13 +54,12 @@ export interface WeekOutput {
   /** Groups by area, then by merge. */
   areas: Record<string, WeekGroup[]>;
   unreadable: UnreadableCard[];
+  claudeUnavailable: ClaudeUnavailable | null;
 }
-export interface CurateOutput {
-  id: string;
-  status: "kept" | "dropped";
-  /** Whether a kept card whose code changed was re-anchored at the default branch's head. */
-  reanchored: boolean;
-}
+/** A kept card whose code changed is re-anchored at the default branch's head, and then carries its new range. */
+export type CurateOutput =
+  | { id: string; status: "kept" | "dropped"; reanchored: false }
+  | { id: string; status: "kept"; reanchored: true; path: string; startLine: number; endLine: number };
 export interface DueCard {
   id: string;
   area: string;
@@ -85,6 +86,7 @@ export interface StatsOutput {
   reviews: number;
   right: number;
   unreadable: UnreadableCard[];
+  claudeUnavailable: ClaudeUnavailable | null;
 }
 export interface CardOutput {
   path: string;
@@ -156,13 +158,36 @@ function lookupCard(key: string, id: string): { card: Card } | { missing: true }
   }
 }
 
-/** The card's anchor re-made at the default branch's head, or null when the code there can't hold it. */
+/** 1-based lines where `symbol` occurs as a whole word, matched as anchor.ts matches symbols. */
+function symbolLines(content: string | null, symbol: string): number[] {
+  if (content === null) return [];
+  const escaped = symbol.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`(?<![A-Za-z0-9_$])${escaped}(?![A-Za-z0-9_$])`);
+  return content.split("\n").flatMap((line, i) => (re.test(line) ? [i + 1] : []));
+}
+
+function nearest(lines: number[], to: number): number | null {
+  return lines.length === 0 ? null : lines.reduce((best, l) => (Math.abs(l - to) < Math.abs(best - to) ? l : best));
+}
+
+/**
+ * The card's anchor re-made at the default branch's head, or null when the code there can't hold it.
+ * With a symbol, the range moves with the symbol's line (the occurrence nearest the old block),
+ * so lines inserted above don't shift the card onto other code; a symbol gone at head is a failure.
+ */
 function reanchor(repoPath: string, card: Card) {
   const branch = defaultBranch(repoPath);
   const head = branch && resolveCommit(repoPath, branch);
   if (!head) return null;
   const a = card.anchor;
-  return makeAnchor(repoPath, head, a.path, a.startLine, a.endLine, a.symbol);
+  let shift = 0;
+  if (a.symbol) {
+    const oldLine = nearest(symbolLines(fileAt(repoPath, a.commit, a.path), a.symbol), a.startLine) ?? a.startLine;
+    const newLine = nearest(symbolLines(fileAt(repoPath, head, a.path), a.symbol), oldLine);
+    if (newLine === null) return null;
+    shift = newLine - oldLine;
+  }
+  return makeAnchor(repoPath, head, a.path, a.startLine + shift, a.endLine + shift, a.symbol);
 }
 
 export async function main(argv: string[], deps: CliDeps = {}): Promise<CliResult> {
@@ -222,7 +247,8 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
       }
     }
     case "week": {
-      const { cards, unreadable } = listCardsReport(connected(values.repo).key);
+      const { key } = connected(values.repo);
+      const { cards, unreadable } = listCardsReport(key);
       // Everything waiting for the user: all drafts, plus kept cards whose code changed or was removed.
       const items = cards.filter((c) => c.status === "draft" || (c.status === "kept" && c.anchor.status !== "fresh"));
       const areas: Record<string, WeekGroup[]> = {};
@@ -234,6 +260,7 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
       }
       const out: WeekOutput = {
         drafts: items.filter((c) => c.status === "draft").length, flagged: items.filter((c) => c.status === "kept").length, areas, unreadable,
+        claudeUnavailable: readState(key).unavailable ?? null,
       };
       return ok(out);
     }
@@ -250,21 +277,21 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
         };
         return { code: 1, out };
       }
-      let card = found.card;
-      let reanchored = false;
+      const card = found.card;
+      let out: CurateOutput = { id, status: decision === "drop" ? "dropped" : "kept", reanchored: false };
+      let anchor = card.anchor;
       if (decision !== "drop") {
         if (card.anchor.status === "orphaned") return fail(`the code for ${id} was removed; drop it or fix its anchor`);
         if (card.status === "kept" && card.anchor.status === "changed") {
-          const anchor = reanchor(repoPath, card);
-          if (!anchor) return fail(`can't re-anchor ${id}: fix the card or drop it`);
-          card = { ...card, anchor };
-          reanchored = true;
+          const moved = reanchor(repoPath, card);
+          if (!moved) return fail(`can't re-anchor ${id}: fix the card or drop it`);
+          anchor = moved;
+          out = { id, status: "kept", reanchored: true, path: moved.path, startLine: moved.startLine, endLine: moved.endLine };
         }
       }
-      const status = decision === "drop" ? "dropped" : "kept";
-      writeCard(key, { ...card, status });
+      writeCard(key, { ...card, status: out.status, anchor });
       appendJsonl(key, "curation.jsonl", { card: id, decision, at: now().toISOString() });
-      return ok({ id, status, reanchored } satisfies CurateOutput);
+      return ok(out);
     }
     case "due": {
       const limit = count(values.limit);
@@ -304,6 +331,7 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
         curated: { keep: decided("keep"), fix: decided("fix"), drop: decided("drop") },
         reviews: reviews.length, right: reviews.filter((r) => r.grade === "right").length,
         unreadable,
+        claudeUnavailable: readState(key).unavailable ?? null,
       };
       return ok(out);
     }
