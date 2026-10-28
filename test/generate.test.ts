@@ -107,7 +107,7 @@ describe("prompt and CLI arguments", () => {
     expect(args).not.toContain("--bare");
   });
 
-  it("passes CODEBRAIN_SETTING_SOURCES through, defaulting to none", () => {
+  it("allows CODEBRAIN_SETTING_SOURCES only as user, defaulting to none", () => {
     const old = process.env.CODEBRAIN_SETTING_SOURCES;
     try {
       const sources = () => {
@@ -118,6 +118,10 @@ describe("prompt and CLI arguments", () => {
       expect(sources()).toBe("");
       process.env.CODEBRAIN_SETTING_SOURCES = "user";
       expect(sources()).toBe("user");
+      for (const v of ["project", "local", "user,project", "user,local", " user"]) {
+        process.env.CODEBRAIN_SETTING_SOURCES = v;
+        expect(sources()).toBe("");
+      }
     } finally {
       if (old === undefined) delete process.env.CODEBRAIN_SETTING_SOURCES;
       else process.env.CODEBRAIN_SETTING_SOURCES = old;
@@ -160,6 +164,12 @@ describe("parseRawCards", () => {
 
   it("tries earlier closing brackets when prose after the array has brackets", () => {
     expect(parseRawCards('Here: [{"kind":"flashcard"}]\nSee [1].')).toEqual([{ kind: "flashcard" }]);
+  });
+
+  it("skips bracketed arrays that aren't cards", () => {
+    const card = { kind: "flashcard", front: "f", back: "b" };
+    expect(parseRawCards(`Here are [2] cards: ${JSON.stringify([card])}`)).toEqual([card]);
+    expect(parseRawCards("Nothing worth a card [sorry]: []")).toEqual([]);
   });
 
   it("gives up quickly on a reply full of brackets", () => {

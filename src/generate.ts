@@ -45,14 +45,22 @@ function budget(): string {
   return Number.isFinite(n) && n > 0 ? String(n) : DEFAULT_BUDGET_USD;
 }
 
+/**
+ * No settings files by default, so no user or project hooks, plugins or env run in the child.
+ * CODEBRAIN_SETTING_SOURCES=user opts back into user settings, for users whose auth lives in
+ * ~/.claude/settings.json. Nothing else is allowed, so a repo's project or local settings
+ * (and their hooks) can never run.
+ */
+function settingSources(): string {
+  return process.env.CODEBRAIN_SETTING_SOURCES === "user" ? "user" : "";
+}
+
 export function claudeArgs(prompt: string): string[] {
   return [
     "-p", prompt,
     "--tools", "",
     "--strict-mcp-config",
-    // No settings files by default, so no user or project hooks, plugins or env run in the child.
-    // CODEBRAIN_SETTING_SOURCES (e.g. "user") opts back in, for users whose auth lives in settings.json.
-    "--setting-sources", process.env.CODEBRAIN_SETTING_SOURCES ?? "",
+    "--setting-sources", settingSources(),
     "--disable-slash-commands",
     "--permission-mode", "dontAsk",
     "--max-turns", "1",
@@ -205,9 +213,14 @@ function tryJson(text: string): { ok: true; value: unknown } | { ok: false } {
   }
 }
 
+/** [] or an array of plain objects, so a bracketed aside such as "[2]" isn't taken for the cards. */
+function isCardArray(v: unknown): boolean {
+  return Array.isArray(v) && v.every((e) => e !== null && typeof e === "object" && !Array.isArray(e));
+}
+
 /**
  * Finds the array of cards in a model reply: the whole reply if it is JSON,
- * else a ```json fenced block, else the first bracketed slice that parses as an array.
+ * else a ```json fenced block, else the first bracketed slice that parses as [] or an array of objects.
  */
 export function parseRawCards(text: string): RawCard[] {
   const whole = tryJson(text.trim());
@@ -227,7 +240,7 @@ export function parseRawCards(text: string): RawCard[] {
     for (let end = text.lastIndexOf("]"); end > start; end = text.lastIndexOf("]", end - 1)) {
       if (++attempts > MAX_PARSE_ATTEMPTS) throw new ModelOutputError("no JSON array in model output");
       const v = tryJson(text.slice(start, end + 1));
-      if (v.ok && Array.isArray(v.value)) return v.value as RawCard[];
+      if (v.ok && isCardArray(v.value)) return v.value as RawCard[];
     }
   }
   throw new ModelOutputError("no JSON array in model output");
