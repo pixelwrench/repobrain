@@ -42,13 +42,13 @@ describe("cli", () => {
     expect(cap).toMatchObject({ code: 0, out: { status: "done", cardsWritten: 2 } });
 
     const week = (await cli("week")).out as WeekOutput;
-    expect(week).toMatchObject({ drafts: 2, flagged: 0, unreadable: [], claudeUnavailable: null });
+    expect(week).toMatchObject({ drafts: 2, flagged: 0, unreadable: [], claudeUnavailable: null, stateError: null });
     expect(week.areas["src"][0].title).toBe("feat: referral codes");
     const [first, second] = week.areas["src"][0].cards.map((c) => c.id);
 
     expect((await cli("curate", first, "keep")).out).toEqual({ id: first, status: "kept", reanchored: false });
     expect((await cli("curate", second, "drop")).out).toEqual({ id: second, status: "dropped", reanchored: false });
-    expect((await cli("week")).out).toEqual({ drafts: 0, flagged: 0, areas: {}, unreadable: [], claudeUnavailable: null });
+    expect((await cli("week")).out).toEqual({ drafts: 0, flagged: 0, areas: {}, unreadable: [], claudeUnavailable: null, stateError: null });
 
     const due = (await cli("due")).out as DueOutput;
     expect(due.due.map((d) => d.id)).toEqual([first]);
@@ -57,7 +57,7 @@ describe("cli", () => {
 
     expect((await cli("stats")).out).toEqual({
       cards: 2, draft: 0, kept: 1, dropped: 1, changed: 0, orphaned: 0,
-      curated: { keep: 1, fix: 0, drop: 1 }, reviews: 1, right: 1, unreadable: [], claudeUnavailable: null,
+      curated: { keep: 1, fix: 0, drop: 1 }, reviews: 1, right: 1, unreadable: [], claudeUnavailable: null, stateError: null,
     } satisfies StatsOutput);
   });
 
@@ -245,6 +245,17 @@ describe("cli", () => {
     writeState(key, { ...readState(key), unavailable });
     expect(((await cli("week")).out as WeekOutput).claudeUnavailable).toEqual(unavailable);
     expect(((await cli("stats")).out as StatsOutput).claudeUnavailable).toEqual(unavailable);
+  });
+
+  it("still shows week and stats when state.json is corrupt, and reports the error", async () => {
+    const key = await connectAndCapture();
+    fs.writeFileSync(path.join(repoDir(key), "state.json"), "{not json");
+    const week = await cli("week");
+    expect(week.code).toBe(0);
+    expect(week.out as WeekOutput).toMatchObject({ drafts: 2, claudeUnavailable: null, stateError: expect.stringContaining("state.json") });
+    const stats = await cli("stats");
+    expect(stats.code).toBe(0);
+    expect(stats.out as StatsOutput).toMatchObject({ cards: 2, claudeUnavailable: null, stateError: expect.stringContaining("state.json") });
   });
 
   it("limits due cards", async () => {

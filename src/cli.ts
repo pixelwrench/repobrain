@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
-import { makeAnchor } from "./anchor.js";
+import { findSymbolLines, makeAnchor } from "./anchor.js";
 import { runCapture, type CaptureReport } from "./capture.js";
 import { LETTERS, type AnchorStatus, type Card, type CardBody, type CardStatus } from "./format.js";
 import type { RunClaude } from "./generate.js";
@@ -55,6 +55,8 @@ export interface WeekOutput {
   areas: Record<string, WeekGroup[]>;
   unreadable: UnreadableCard[];
   claudeUnavailable: ClaudeUnavailable | null;
+  /** Why state.json couldn't be read (corrupt), or null when it reads fine. */
+  stateError: string | null;
 }
 /** A kept card whose code changed is re-anchored at the default branch's head, and then carries its new range. */
 export type CurateOutput =
@@ -87,6 +89,8 @@ export interface StatsOutput {
   right: number;
   unreadable: UnreadableCard[];
   claudeUnavailable: ClaudeUnavailable | null;
+  /** Why state.json couldn't be read (corrupt), or null when it reads fine. */
+  stateError: string | null;
 }
 export interface CardOutput {
   path: string;
@@ -158,12 +162,13 @@ function lookupCard(key: string, id: string): { card: Card } | { missing: true }
   }
 }
 
-/** 1-based lines where `symbol` occurs as a whole word, matched as anchor.ts matches symbols. */
-function symbolLines(content: string | null, symbol: string): number[] {
-  if (content === null) return [];
-  const escaped = symbol.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const re = new RegExp(`(?<![A-Za-z0-9_$])${escaped}(?![A-Za-z0-9_$])`);
-  return content.split("\n").flatMap((line, i) => (re.test(line) ? [i + 1] : []));
+/** Capture state for week and stats; a corrupt state.json is reported rather than making curation unusable. */
+function stateStatus(key: string): { claudeUnavailable: ClaudeUnavailable | null; stateError: string | null } {
+  try {
+    return { claudeUnavailable: readState(key).unavailable ?? null, stateError: null };
+  } catch (e) {
+    return { claudeUnavailable: null, stateError: message(e) };
+  }
 }
 
 function nearest(lines: number[], to: number): number | null {
@@ -182,8 +187,8 @@ function reanchor(repoPath: string, card: Card) {
   const a = card.anchor;
   let shift = 0;
   if (a.symbol) {
-    const oldLine = nearest(symbolLines(fileAt(repoPath, a.commit, a.path), a.symbol), a.startLine) ?? a.startLine;
-    const newLine = nearest(symbolLines(fileAt(repoPath, head, a.path), a.symbol), oldLine);
+    const oldLine = nearest(findSymbolLines(fileAt(repoPath, a.commit, a.path), a.symbol), a.startLine) ?? a.startLine;
+    const newLine = nearest(findSymbolLines(fileAt(repoPath, head, a.path), a.symbol), oldLine);
     if (newLine === null) return null;
     shift = newLine - oldLine;
   }
@@ -260,7 +265,7 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
       }
       const out: WeekOutput = {
         drafts: items.filter((c) => c.status === "draft").length, flagged: items.filter((c) => c.status === "kept").length, areas, unreadable,
-        claudeUnavailable: readState(key).unavailable ?? null,
+        ...stateStatus(key),
       };
       return ok(out);
     }
@@ -331,7 +336,7 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
         curated: { keep: decided("keep"), fix: decided("fix"), drop: decided("drop") },
         reviews: reviews.length, right: reviews.filter((r) => r.grade === "right").length,
         unreadable,
-        claudeUnavailable: readState(key).unavailable ?? null,
+        ...stateStatus(key),
       };
       return ok(out);
     }

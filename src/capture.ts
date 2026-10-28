@@ -201,6 +201,8 @@ async function capture(key: string, opts: CaptureOptions): Promise<CaptureReport
           skip(msg);
           continue;
         }
+        // claude ran and failed this merge, so it isn't unavailable.
+        if (e instanceof ClaudeResultError || e instanceof ClaudeLimitError) delete state.unavailable;
         // Retrying a merge that hit the budget would spend the same again for nothing.
         if (e instanceof ClaudeResultError && e.subtype === "error_max_budget_usd") {
           skip(`over budget: ${msg.slice(0, 200)}`);

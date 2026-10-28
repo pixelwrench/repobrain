@@ -240,6 +240,26 @@ describe("runCapture", () => {
     expect((readState(key) as CaptureState).unavailable).toBeUndefined();
   });
 
+  it("clears the unavailable record when claude ran but failed the merge (a strike)", async () => {
+    await runCapture(key, opts(fake()));
+    const sha = commit(repo, { "src/ref.ts": FILE }, "feat: referral codes");
+    await runCapture(key, opts(failing(() => new ClaudeEnvError("offline"))));
+    expect((readState(key) as CaptureState).unavailable?.message).toBe("offline");
+    expect((await runCapture(key, opts(failing()))).status).toBe("failed");
+    const after: CaptureState = readState(key);
+    expect(after.failures).toEqual({ sha, count: 1 });
+    expect(after.unavailable).toBeUndefined();
+  });
+
+  it("clears the unavailable record when a merge is skipped for running over budget", async () => {
+    await runCapture(key, opts(fake()));
+    commit(repo, { "src/ref.ts": FILE }, "feat: referral codes");
+    await runCapture(key, opts(failing(() => new ClaudeEnvError("offline"))));
+    const run = failing(() => new ClaudeResultError("error_max_budget_usd", "claude returned an error (error_max_budget_usd)"));
+    expect(await runCapture(key, opts(run))).toMatchObject({ status: "done", skipped: 1 });
+    expect((readState(key) as CaptureState).unavailable).toBeUndefined();
+  });
+
   it("does nothing, quietly, when the repo path is gone", async () => {
     await runCapture(key, opts(fake()));
     const before = readState(key);

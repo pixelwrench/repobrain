@@ -35,10 +35,21 @@ function wordChars(lines: string[]): number {
   return n;
 }
 
-function hasSymbol(content: string, symbol: string): boolean {
+/** Matches `symbol` as a whole word. Lookarounds rather than \b, so symbols that start or end with `$` still match whole. */
+function symbolPattern(symbol: string): RegExp {
   const escaped = symbol.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  // Lookarounds rather than \b, so symbols that start or end with `$` still match whole.
-  return new RegExp(`(?<![A-Za-z0-9_$])${escaped}(?![A-Za-z0-9_$])`).test(content);
+  return new RegExp(`(?<![A-Za-z0-9_$])${escaped}(?![A-Za-z0-9_$])`);
+}
+
+function hasSymbol(content: string, symbol: string): boolean {
+  return symbolPattern(symbol).test(content);
+}
+
+/** 1-based lines where `symbol` occurs as a whole word, matched as makeAnchor matches symbols. */
+export function findSymbolLines(content: string | null, symbol: string): number[] {
+  if (content === null) return [];
+  const re = symbolPattern(symbol);
+  return content.split("\n").flatMap((line, i) => (re.test(line) ? [i + 1] : []));
 }
 
 export function makeAnchor(repo: string, commit: string, path: string, startLine: number, endLine: number, symbol: string | null): Anchor | null {
