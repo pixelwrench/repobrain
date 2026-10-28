@@ -1,0 +1,13 @@
+{
+  "description": "Start CodeBrain capture in the background when a session starts in a connected repository.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear",
+        "hooks": [
+          { "type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/dist/hook-bin.js"], "timeout": 5 }
+        ]
+      }
+    ]
+  }
+}

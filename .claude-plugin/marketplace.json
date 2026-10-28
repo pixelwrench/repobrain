@@ -1,0 +1,6 @@
+{
+  "name": "codebrain-local",
+  "owner": { "name": "pixelwrench" },
+  "description": "Local marketplace for dogfooding the CodeBrain plugin from a built checkout.",
+  "plugins": [{ "name": "codebrain", "source": "./", "description": "CodeBrain: review cards from merged changes." }]
+}
