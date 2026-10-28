@@ -282,6 +282,19 @@ describe("runClaude with a fake claude", () => {
     await expect(createRunClaude()("p", "s")).rejects.toThrow(/CODEBRAIN_SETTING_SOURCES=user/);
   });
 
+  it.each([400, 413, 422])("counts an API %i (caused by the merge, such as a prompt too long) as a result error", async (status) => {
+    fake(`printf '%s' '${apiError(status, "prompt is too long")}'; exit 1`);
+    const e = await createRunClaude()("p", "s").catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(ClaudeResultError);
+    expect((e as ClaudeResultError).subtype).toBe(`api_error_${status}`);
+    expect((e as Error).message).toMatch(/prompt is too long/);
+  });
+
+  it.each([500, 529])("treats an API %i as an environment error", async (status) => {
+    fake(`printf '%s' '${apiError(status, "overloaded")}'; exit 1`);
+    await expect(createRunClaude()("p", "s")).rejects.toThrow(ClaudeEnvError);
+  });
+
   it("reports a missing claude binary as an environment error", async () => {
     process.env.PATH = tempDir("codebrain-nobin-");
     const e = await createRunClaude()("p", "s").catch((x: unknown) => x);

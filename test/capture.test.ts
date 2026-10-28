@@ -13,16 +13,19 @@ const hooks = vi.hoisted(() => ({
   fileReads: [] as string[],
   refreshes: 0,
   releases: 0,
+  commitDiffError: null as null | Error,
+  firstParentError: null as null | Error,
+  listCardsError: null as null | Error,
 }));
 
 vi.mock("../src/anchor.js", async (importOriginal) => {
   const real = await importOriginal<typeof import("../src/anchor.js")>();
   return {
     ...real,
-    anchorStatusIn: (content: string | null, anchor: import("../src/format.js").Anchor) => {
+    locateAnchor: (content: string | null, anchor: import("../src/format.js").Anchor) => {
       hooks.statusChecks++;
       hooks.beforeStatus?.(anchor.path);
-      return real.anchorStatusIn(content, anchor);
+      return real.locateAnchor(content, anchor);
     },
   };
 });
@@ -35,6 +38,14 @@ vi.mock("../src/git.js", async (importOriginal) => {
       hooks.fileReads.push(p);
       return real.fileAt(repo, rev, p);
     },
+    commitDiff: (...args: Parameters<typeof real.commitDiff>) => {
+      if (hooks.commitDiffError) throw hooks.commitDiffError;
+      return real.commitDiff(...args);
+    },
+    firstParentCommits: (...args: Parameters<typeof real.firstParentCommits>) => {
+      if (hooks.firstParentError) throw hooks.firstParentError;
+      return real.firstParentCommits(...args);
+    },
   };
 });
 
@@ -42,6 +53,10 @@ vi.mock("../src/store.js", async (importOriginal) => {
   const real = await importOriginal<typeof import("../src/store.js")>();
   return {
     ...real,
+    listCards: (...args: Parameters<typeof real.listCards>) => {
+      if (hooks.listCardsError) throw hooks.listCardsError;
+      return real.listCards(...args);
+    },
     acquireLock: (key: string, staleMs?: number) => {
       const lock = real.acquireLock(key, staleMs);
       if (!lock) return null;
@@ -97,6 +112,9 @@ describe("runCapture", () => {
     hooks.fileReads = [];
     hooks.refreshes = 0;
     hooks.releases = 0;
+    hooks.commitDiffError = null;
+    hooks.firstParentError = null;
+    hooks.listCardsError = null;
   });
 
   /** Captures one merge of src/ref.ts and keeps its cards. */
@@ -515,5 +533,82 @@ describe("runCapture", () => {
     expect(report).toMatchObject({ status: "done", anchorsUpdated: 1 });
     expect(readCard(key, second.id).anchor.status).toBe("changed");
     expect(log()).toContain(`anchor check for ${first.id} failed`);
+  });
+  it("normalises .codebrain/ignore lines and drops the ones git can't take", async () => {
+    await runCapture(key, opts(fake()));
+    fs.mkdirSync(path.join(repo, ".codebrain"), { recursive: true });
+    fs.writeFileSync(path.join(repo, ".codebrain", "ignore"), "# comment\n/secrets/**\n!keep.txt\n:(top)other\n");
+    commit(repo, { "src/ref.ts": FILE, "secrets/notes.txt": "private\n", ".codebrain/ignore": fs.readFileSync(path.join(repo, ".codebrain", "ignore"), "utf8") }, "feat");
+    let stdin = "";
+    const report = await runCapture(key, opts(async (_p, s) => ((stdin = s), JSON.stringify([cardFor("src/ref.ts")]))));
+    expect(report).toMatchObject({ status: "done", cardsWritten: 1 });
+    expect(stdin).toContain("src/ref.ts");
+    expect(stdin).not.toContain("secrets/notes.txt");
+    expect(log()).toContain('ignore line dropped: "!keep.txt"');
+    expect(log()).toContain('ignore line dropped: ":(top)other"');
+  });
+
+  it("counts a git error on one merge as a strike, then skips it", async () => {
+    await runCapture(key, opts(fake()));
+    const sha = commit(repo, { "src/ref.ts": FILE }, "feat: referral codes");
+    hooks.commitDiffError = new Error("fatal: bad pathspec");
+    for (let i = 1; i <= 2; i++) {
+      expect(await runCapture(key, opts(fake()))).toMatchObject({ status: "failed" });
+      expect(readState(key).failures).toEqual({ sha, count: i });
+    }
+    expect(readState(key).lastError).toMatchObject({ message: expect.stringContaining("bad pathspec") });
+    expect(await runCapture(key, opts(fake()))).toMatchObject({ status: "done", skipped: 1 });
+    expect(readState(key).lastSha).toBe(sha);
+    expect(log()).toContain(`${sha} skipped (failed 3 times: git: fatal: bad pathspec)`);
+  });
+
+  it("reports a git error listing merges as a failed run instead of throwing", async () => {
+    await runCapture(key, opts(fake()));
+    commit(repo, { "src/ref.ts": FILE }, "feat: referral codes");
+    const before = readState(key).lastSha;
+    hooks.firstParentError = new Error("fatal: bad revision");
+    expect(await runCapture(key, opts(fake()))).toMatchObject({ status: "failed", error: expect.stringContaining("bad revision") });
+    expect(readState(key)).toMatchObject({ lastSha: before, lastError: { at: "2026-11-02T09:00:00.000Z", message: expect.stringContaining("bad revision") } });
+    hooks.firstParentError = null;
+    expect((await runCapture(key, opts(fake()))).status).toBe("done");
+    expect(readState(key).lastError).toBeUndefined();
+  });
+
+  it("records an unexpected error in state before rethrowing", async () => {
+    await runCapture(key, opts(fake()));
+    hooks.listCardsError = new Error("disk on fire");
+    await expect(runCapture(key, opts(fake()))).rejects.toThrow("disk on fire");
+    expect(readState(key).lastError).toEqual({ at: "2026-11-02T09:00:00.000Z", message: "disk on fire" });
+  });
+
+  it("still checks anchors when claude is unavailable or a merge takes a strike", async () => {
+    const [card] = await keptCards();
+    commit(repo, { "src/ref.ts": FILE.replace("return null", "throw new Error('unknown')") }, "fix: throw");
+    const report = await runCapture(key, opts(failing(() => new ClaudeEnvError("offline"))));
+    expect(report).toMatchObject({ status: "failed", anchorsUpdated: 1 });
+    expect(readCard(key, card.id).anchor.status).toBe("changed");
+    writeCard(key, { ...readCard(key, card.id), anchor: { ...card.anchor } });
+    expect(await runCapture(key, opts(failing()))).toMatchObject({ status: "failed", anchorsUpdated: 1 });
+    expect(readCard(key, card.id).anchor.status).toBe("changed");
+  });
+
+  it("re-checks orphaned cards, so a file that comes back makes its card fresh", async () => {
+    const [card] = await keptCards();
+    commit(repo, { "src/ref.ts": null }, "remove");
+    await runCapture(key, opts(empty));
+    expect(readCard(key, card.id).anchor.status).toBe("orphaned");
+    commit(repo, { "src/ref.ts": FILE }, "restore");
+    expect((await runCapture(key, opts(empty))).anchorsUpdated).toBe(1);
+    expect(readCard(key, card.id).anchor.status).toBe("fresh");
+  });
+
+  it("moves a card's range when its block moved within the file", async () => {
+    const [card] = await keptCards();
+    const head = commit(repo, { "src/ref.ts": "// one\n// two\n\n" + FILE }, "add header");
+    expect((await runCapture(key, opts(empty))).anchorsUpdated).toBe(1);
+    const moved = readCard(key, card.id).anchor;
+    expect(moved).toMatchObject({ status: "fresh", commit: head, startLine: card.anchor.startLine + 3, endLine: card.anchor.endLine + 3 });
+    expect(moved.fingerprint).toBe(card.anchor.fingerprint);
+    expect((await runCapture(key, opts(empty))).anchorsUpdated).toBe(0);
   });
 });

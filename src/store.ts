@@ -24,6 +24,8 @@ export interface RepoState {
    * it began. Capture sets it and any successful claude call clears it; week and stats show it.
    */
   unavailable?: { since: string; message: string };
+  /** The last unexpected capture failure (a git error, say); a run that completes clears it. Week and stats show it. */
+  lastError?: { at: string; message: string };
 }
 
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;

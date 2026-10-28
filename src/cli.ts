@@ -28,6 +28,8 @@ export type BodyOutput = Extract<CardBody, { kind: "flashcard" }> | (Extract<Car
 export type UnreadableCard = CardListing["unreadable"][number];
 /** Set while capture can't reach claude (missing, logged out, offline, rate-limited), from when it began. */
 export type ClaudeUnavailable = NonNullable<RepoState["unavailable"]>;
+/** The last unexpected capture failure, such as a git error, until a capture completes. */
+export type CaptureError = NonNullable<RepoState["lastError"]>;
 
 export interface ConnectOutput {
   connected: string;
@@ -57,6 +59,7 @@ export interface WeekOutput {
   areas: Record<string, WeekGroup[]>;
   unreadable: UnreadableCard[];
   claudeUnavailable: ClaudeUnavailable | null;
+  lastCaptureError: CaptureError | null;
   /** Why state.json couldn't be read (corrupt), or null when it reads fine. */
   stateError: string | null;
 }
@@ -95,6 +98,7 @@ export interface StatsOutput {
   right: number;
   unreadable: UnreadableCard[];
   claudeUnavailable: ClaudeUnavailable | null;
+  lastCaptureError: CaptureError | null;
   /** Why state.json couldn't be read (corrupt), or null when it reads fine. */
   stateError: string | null;
 }
@@ -213,11 +217,12 @@ function lookupCard(key: string, id: string): { card: Card } | { missing: true }
 }
 
 /** Capture state for week and stats; a corrupt state.json is reported rather than making curation unusable. */
-function stateStatus(key: string): { claudeUnavailable: ClaudeUnavailable | null; stateError: string | null } {
+function stateStatus(key: string): { claudeUnavailable: ClaudeUnavailable | null; lastCaptureError: CaptureError | null; stateError: string | null } {
   try {
-    return { claudeUnavailable: readState(key).unavailable ?? null, stateError: null };
+    const state = readState(key);
+    return { claudeUnavailable: state.unavailable ?? null, lastCaptureError: state.lastError ?? null, stateError: null };
   } catch (e) {
-    return { claudeUnavailable: null, stateError: message(e) };
+    return { claudeUnavailable: null, lastCaptureError: null, stateError: message(e) };
   }
 }
 

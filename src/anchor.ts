@@ -81,22 +81,40 @@ export function makeAnchor(repo: string, commit: string, path: string, startLine
 
 /** Whether the anchored block still exists anywhere in the file at `rev`. */
 export function checkAnchor(repo: string, rev: string, anchor: Anchor): AnchorStatus {
-  return anchorStatusIn(fileAt(repo, rev, anchor.path), anchor);
+  return locateAnchor(fileAt(repo, rev, anchor.path), anchor).status;
 }
 
-/** Whether the anchored block exists in `content` (the file's text, or null when the file is gone). */
-export function anchorStatusIn(content: string | null, anchor: Anchor): AnchorStatus {
-  if (content === null) return "orphaned";
-  const lines = normalizedLines(content);
+/** Where an anchored block is in a file: fresh with its current line range, or changed, or orphaned. */
+export type AnchorMatch = { status: "fresh"; startLine: number; endLine: number } | { status: "changed" | "orphaned" };
+
+/**
+ * Finds the anchored block in `content` (the file's text, or null when the file is gone).
+ * When the block appears more than once, the copy nearest the anchor's old start line wins.
+ */
+export function locateAnchor(content: string | null, anchor: Anchor): AnchorMatch {
+  if (content === null) return { status: "orphaned" };
+  // Line numbers (1-based) of the trimmed, non-blank lines, so a window maps back to a range.
+  const lines: string[] = [];
+  const lineNos: number[] = [];
+  content.split("\n").forEach((raw, i) => {
+    const l = raw.trim();
+    if (l.length > 0) {
+      lines.push(l);
+      lineNos.push(i + 1);
+    }
+  });
   const k = anchor.lines;
-  if (!Number.isInteger(k) || k < 1 || k > lines.length) return "changed";
+  if (!Number.isInteger(k) || k < 1 || k > lines.length) return { status: "changed" };
   // Join once and hash substrings, so each window costs one hash and no array copies.
   // Lines are trimmed and non-empty, so a window's substring equals lines.slice(...).join("\n").
   const joined = lines.join("\n");
   const offsets: number[] = [0];
   for (const l of lines) offsets.push(offsets[offsets.length - 1] + l.length + 1);
+  let best: { startLine: number; endLine: number } | null = null;
   for (let i = 0; i + k <= lines.length; i++) {
-    if (hashOf(joined.slice(offsets[i], offsets[i + k] - 1)) === anchor.fingerprint) return "fresh";
+    if (hashOf(joined.slice(offsets[i], offsets[i + k] - 1)) !== anchor.fingerprint) continue;
+    const found = { startLine: lineNos[i], endLine: lineNos[i + k - 1] };
+    if (!best || Math.abs(found.startLine - anchor.startLine) < Math.abs(best.startLine - anchor.startLine)) best = found;
   }
-  return "changed";
+  return best ? { status: "fresh", ...best } : { status: "changed" };
 }

@@ -108,6 +108,9 @@ interface ResultJson {
   terminal_reason?: unknown;
 }
 
+/** API statuses that say nothing about the request: auth (401, 403) and rate or usage limits (429). 5xx and no status join them. */
+const ENV_STATUSES = new Set([401, 403, 429]);
+
 const AUTH_HINT = " (if your Claude auth is set in settings.json, set CODEBRAIN_SETTING_SOURCES=user)";
 
 /** claude's result object from its --output-format json stdout, or null when there is none. */
@@ -128,14 +131,21 @@ function resultJson(out: string): ResultJson | null {
 function resultText(res: ResultJson, out: string): string {
   if (res.is_error === false && res.subtype === "success" && typeof res.result === "string") return res.result;
   // An API failure (bad key, logged out, rate or usage limit, outage) comes back as an is_error
-  // result with subtype "success" and/or API fields. It says nothing about the merge.
+  // result with subtype "success" and/or API fields. Most say nothing about the merge.
   const status = res.api_error_status;
   const apiFailure =
     res.is_error === true && (res.subtype === "success" || (status !== undefined && status !== null) || res.terminal_reason === "api_error");
   if (apiFailure) {
     const text = typeof res.result === "string" ? res.result : "";
-    const auth = status === 401 || status === 403 || AUTH_ERROR.test(text);
-    const what = typeof status === "number" ? `API error ${status}` : "API error";
+    // Any other status, such as 400 (prompt too long) or 413 (request too large), comes from this
+    // merge's request, so it counts against the merge instead of being retried forever.
+    const code = status === undefined || status === null ? null : Number(status);
+    if (code !== null && !(ENV_STATUSES.has(code) || code >= 500)) {
+      const label = Number.isFinite(code) ? code : String(status);
+      throw new ClaudeResultError(`api_error_${label}`, `claude returned an error (API error ${label}): ${(text || out).slice(0, 500)}`);
+    }
+    const auth = code === 401 || code === 403 || AUTH_ERROR.test(text);
+    const what = code !== null ? `API error ${code}` : "API error";
     throw new ClaudeEnvError(`claude failed (${what})${auth ? AUTH_HINT : ""}: ${(text || out).slice(0, 500)}`);
   }
   const subtype = typeof res.subtype === "string" ? res.subtype : "unknown";

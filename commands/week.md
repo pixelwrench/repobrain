@@ -8,6 +8,7 @@ Run `codebrain week`. If it fails, show the error and stop; if it says the repos
 
 Report problems first:
 - `claudeUnavailable`: new merges aren't being drafted; claude has been unavailable since `since`. Show `message` and suggest checking that `claude` is installed and logged in.
+- `lastCaptureError`: the last capture run failed unexpectedly at `at` (a git error, say), so new merges may not be drafted. Show `message`. If it mentions a pathspec or `.codebrain/ignore`, suggest checking that file's lines: one git glob per line, no `!` lines. It clears once a capture completes.
 - `stateError`: CodeBrain's state file for this repository is corrupt, so new merges aren't being drafted. Show the message. The fix is to delete exactly the file it names; the next capture then restarts from the default branch's current head, so merges since the last capture never become cards. Say so plainly, and delete it only if the user says yes.
 - `unreadable`: these card files can't be read and are left out. List each `file` and `error`, and offer to repair them (see below).
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { checkAnchor, makeAnchor } from "../src/anchor.js";
+import { checkAnchor, locateAnchor, makeAnchor } from "../src/anchor.js";
 import { commit, makeRepo } from "./helpers.js";
 
 const FILE = ["export function applyReferral(code: string) {", "  const ref = lookup(code);", "  if (!ref) return null;", "  return discount(ref);", "}", ""].join("\n");
@@ -110,5 +110,25 @@ describe("anchors", () => {
     const a = makeAnchor(repo, sha, "src/ref.ts", 1, 5, null)!;
     const head = commit(repo, { "src/ref.ts": null, "src/ref.ts/index.ts": FILE }, "now a dir");
     expect(checkAnchor(repo, head, a)).toBe("orphaned");
+  });
+
+  it("locates a moved block by its original line numbers, blank lines and CRLF included", () => {
+    const repo = makeRepo();
+    const sha = commit(repo, { "src/ref.ts": FILE }, "add referral");
+    const a = makeAnchor(repo, sha, "src/ref.ts", 2, 4, null)!;
+    const lines = FILE.split("\n");
+    const moved = ["// header", "", "", lines[0], lines[1], "", lines[2], lines[3], lines[4], ""].join("\r\n");
+    expect(locateAnchor(moved, a)).toEqual({ status: "fresh", startLine: 5, endLine: 8 });
+    expect(locateAnchor(FILE.replace("return null", "return 0"), a)).toEqual({ status: "changed" });
+    expect(locateAnchor(null, a)).toEqual({ status: "orphaned" });
+  });
+
+  it("picks the copy nearest the old range when a block appears twice", () => {
+    const repo = makeRepo();
+    const sha = commit(repo, { "src/ref.ts": FILE }, "add referral");
+    const a = makeAnchor(repo, sha, "src/ref.ts", 1, 5, null)!;
+    const twice = FILE + "\n".repeat(20) + FILE;
+    expect(locateAnchor(twice, a)).toEqual({ status: "fresh", startLine: 1, endLine: 5 });
+    expect(locateAnchor(twice, { ...a, startLine: 25, endLine: 29 })).toEqual({ status: "fresh", startLine: 26, endLine: 30 });
   });
 });
