@@ -1,4 +1,6 @@
 import { execFileSync } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
 
 export interface GitOptions {
   /** Kill git (SIGKILL) after this many milliseconds. */
@@ -147,6 +149,25 @@ export function fileAt(repo: string, rev: string, path: string): string | null {
   }
 }
 
-export function toplevel(dir: string): string | null {
-  return tryGit(dir, ["rev-parse", "--show-toplevel"]);
+export function toplevel(dir: string, options?: GitOptions): string | null {
+  return tryGit(dir, ["rev-parse", "--show-toplevel"], options);
+}
+
+/**
+ * The working tree `dir` is in (`top`) and the repository's main working tree (`main`), in one git call.
+ * They differ in a linked worktree. `main` falls back to `top` when the common dir isn't `<main>/.git`
+ * (a submodule, say). Null outside a working tree.
+ */
+export function repoRoots(dir: string, options?: GitOptions): { top: string; main: string } | null {
+  const out = tryGit(dir, ["rev-parse", "--show-toplevel", "--path-format=absolute", "--git-common-dir"], options);
+  const [top, common] = out?.split("\n") ?? [];
+  if (!top) return null;
+  if (!common || path.basename(common) !== ".git") return { top, main: top };
+  let main = path.dirname(common);
+  try {
+    main = fs.realpathSync(main);
+  } catch {
+    return { top, main: top };
+  }
+  return { top, main };
 }

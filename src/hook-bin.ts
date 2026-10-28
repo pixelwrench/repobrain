@@ -1,5 +1,5 @@
 // Claude Code SessionStart hook. Fails open: it never blocks or breaks a session.
-import { startCapture } from "./hook.js";
+// hook.js is imported inside the try, so even a broken install exits 0.
 
 /** How long to wait for the hook's JSON input before falling back to process.cwd(). */
 const STDIN_TIMEOUT_MS = 500;
@@ -7,7 +7,7 @@ const STDIN_TIMEOUT_MS = 500;
 let input = "";
 let finished = false;
 
-function finish(): void {
+async function finish(): Promise<void> {
   if (finished) return;
   finished = true;
   clearTimeout(timer);
@@ -18,11 +18,13 @@ function finish(): void {
     } catch {
       // malformed input: fall back to process.cwd()
     }
+    const { startCapture } = await import("./hook.js");
     startCapture(typeof cwd === "string" && cwd ? cwd : process.cwd());
   } catch {
     // fail open
+  } finally {
+    process.exit(0);
   }
-  process.exit(0);
 }
 
 const timer = setTimeout(finish, STDIN_TIMEOUT_MS);

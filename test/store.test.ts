@@ -19,7 +19,7 @@ import {
   writeFileAtomic,
   writeState,
 } from "../src/store.js";
-import { commit, makeRepo, useTempHome } from "./helpers.js";
+import { commit, makeRepo, sh, tempDir, useTempHome } from "./helpers.js";
 
 const card = (id: string): Card => ({
   id, repo: "r", merge: "m".repeat(40), mergeTitle: "t", area: "src", createdAt: "2026-11-02T09:00:00.000Z", status: "draft",
@@ -45,6 +45,16 @@ describe("store", () => {
   it("connects a repo and finds it from a subdirectory", () => {
     const key = connectRepo(repo);
     expect(findRepo(path.join(repo, "src"))?.key).toBe(key);
+  });
+
+  it("finds the connected main repo from a linked worktree", () => {
+    const key = connectRepo(repo);
+    const inside = path.join(repo, ".worktrees", "feat");
+    sh(repo, ["worktree", "add", "-q", "-b", "feat", inside]);
+    const elsewhere = path.join(tempDir("codebrain-wt-"), "other");
+    sh(repo, ["worktree", "add", "-q", "-b", "other", elsewhere]);
+    expect(findRepo(inside)).toEqual({ key, config: { path: repo, areaDepth: 3 } });
+    expect(findRepo(elsewhere)?.key).toBe(key);
   });
 
   it("returns null for a repo that isn't connected", () => {

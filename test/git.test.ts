@@ -10,6 +10,7 @@ import {
   isAncestor,
   mergeBase,
   revParse,
+  repoRoots,
   toplevel,
 } from "../src/git.js";
 import { commit, makeRepo, sh, tempDir } from "./helpers.js";
@@ -223,5 +224,18 @@ describe("git helpers", () => {
     const outside = tempDir("codebrain-plain-");
     fs.mkdirSync(path.join(outside, "x"));
     expect(toplevel(path.join(outside, "x"))).toBeNull();
+  });
+
+  it("finds the main repo from a linked worktree, wherever it lives", () => {
+    const repo = makeRepo();
+    commit(repo, { "src/a.txt": "a\n" }, "first");
+    expect(repoRoots(path.join(repo, "src"))).toEqual({ top: repo, main: repo });
+    const inside = path.join(repo, ".worktrees", "feat");
+    sh(repo, ["worktree", "add", "-q", "-b", "feat", inside]);
+    expect(repoRoots(path.join(inside, "src"))).toEqual({ top: inside, main: repo });
+    const elsewhere = path.join(tempDir("codebrain-wt-"), "other");
+    sh(repo, ["worktree", "add", "-q", "-b", "other", elsewhere]);
+    expect(repoRoots(elsewhere)).toEqual({ top: elsewhere, main: repo });
+    expect(repoRoots(tempDir("codebrain-plain-"))).toBeNull();
   });
 });

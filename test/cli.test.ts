@@ -252,10 +252,19 @@ describe("cli", () => {
     fs.writeFileSync(path.join(repoDir(key), "state.json"), "{not json");
     const week = await cli("week");
     expect(week.code).toBe(0);
-    expect(week.out as WeekOutput).toMatchObject({ drafts: 2, claudeUnavailable: null, stateError: expect.stringContaining("state.json") });
+    expect(week.out as WeekOutput).toMatchObject({ drafts: 2, claudeUnavailable: null, stateError: expect.stringContaining(path.join(repoDir(key), "state.json")) });
     const stats = await cli("stats");
     expect(stats.code).toBe(0);
-    expect(stats.out as StatsOutput).toMatchObject({ cards: 2, claudeUnavailable: null, stateError: expect.stringContaining("state.json") });
+    expect(stats.out as StatsOutput).toMatchObject({ cards: 2, claudeUnavailable: null, stateError: expect.stringContaining(path.join(repoDir(key), "state.json")) });
+  });
+
+  it("works from a linked worktree of a connected repo", async () => {
+    await connectAndCapture();
+    const wt = path.join(tempDir("codebrain-wt-"), "feat");
+    sh(repo, ["worktree", "add", "-q", "-b", "feat", wt]);
+    const week = await main(["week", "--repo", wt], { now, run });
+    expect(week.code).toBe(0);
+    expect((week.out as WeekOutput).drafts).toBe(2);
   });
 
   it("limits due cards", async () => {

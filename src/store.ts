@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { parseCard, serializeCard, type Card } from "./format.js";
-import { toplevel } from "./git.js";
+import { repoRoots, toplevel, type GitOptions } from "./git.js";
 
 export interface RepoConfig {
   path: string;
@@ -105,12 +105,19 @@ export function connectRepo(dir: string, areaDepth = 3): string {
   return key;
 }
 
-export function findRepo(dir: string): { key: string; config: RepoConfig } | null {
-  const top = toplevel(dir);
-  if (!top) return null;
-  const key = repoKey(top);
-  const config = loadConfig().repos[key];
-  return config ? { key, config } : null;
+/**
+ * The connected repo `dir` belongs to: its own working tree, or, from a linked worktree, the main repo.
+ * Pass `config` when it's already loaded, and `options` to bound the git call.
+ */
+export function findRepo(dir: string, options?: GitOptions, config: Config = loadConfig()): { key: string; config: RepoConfig } | null {
+  const roots = repoRoots(dir, options);
+  if (!roots) return null;
+  for (const root of new Set([roots.top, roots.main])) {
+    const key = repoKey(root);
+    const repo = config.repos[key];
+    if (repo) return { key, config: repo };
+  }
+  return null;
 }
 
 export function readState(key: string): RepoState {
