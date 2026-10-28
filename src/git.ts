@@ -1,34 +1,47 @@
 import { execFileSync } from "node:child_process";
 
-export function git(repo: string, args: string[]): string {
+export interface GitOptions {
+  /** Kill git (SIGKILL) after this many milliseconds. */
+  timeoutMs?: number;
+  maxBuffer?: number;
+}
+
+export function git(repo: string, args: string[], options: GitOptions = {}): string {
   return execFileSync("git", ["-C", repo, ...args], {
     encoding: "utf8",
-    maxBuffer: 64 * 1024 * 1024,
+    maxBuffer: options.maxBuffer ?? 64 * 1024 * 1024,
+    timeout: options.timeoutMs,
+    killSignal: "SIGKILL",
     stdio: ["ignore", "pipe", "pipe"],
-    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+    env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never", SSH_ASKPASS_REQUIRE: "never" },
   });
 }
 
-function tryGit(repo: string, args: string[]): string | null {
+function tryGit(repo: string, args: string[], options?: GitOptions): string | null {
   try {
-    return git(repo, args).trim();
+    return git(repo, args, options).trim();
   } catch {
     return null;
   }
 }
 
+function isCommit(repo: string, rev: string): boolean {
+  return tryGit(repo, ["rev-parse", "--verify", "--quiet", `${rev}^{commit}`]) !== null;
+}
+
 /** origin's default branch when there is one, else the current local branch. */
 export function defaultBranch(repo: string): string {
   const remoteHead = tryGit(repo, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]);
-  if (remoteHead) return remoteHead;
+  if (remoteHead && isCommit(repo, remoteHead)) return remoteHead;
   for (const ref of ["origin/main", "origin/master"]) {
-    if (tryGit(repo, ["rev-parse", "--verify", "--quiet", ref])) return ref;
+    if (isCommit(repo, ref)) return ref;
   }
   return tryGit(repo, ["symbolic-ref", "--short", "HEAD"]) ?? "HEAD";
 }
 
 export function fetchQuietly(repo: string): boolean {
-  return tryGit(repo, ["fetch", "--quiet", "origin"]) !== null;
+  const args = ["fetch", "--quiet", "--no-recurse-submodules", "--no-auto-gc", "origin"];
+  return tryGit(repo, args, { timeoutMs: 30_000 }) !== null;
 }
 
 export function revParse(repo: string, rev: string): string {
@@ -50,9 +63,9 @@ export interface Commit {
 
 /** Commits on `to`'s first-parent line after `from` (or since a date when `from` is null), oldest first. */
 export function firstParentCommits(repo: string, from: string | null, to: string, since?: string): Commit[] {
-  const args = ["log", "--first-parent", "--reverse", "--format=%H%x09%s"];
+  const args = ["log", "--first-parent", "--reverse", "--no-show-signature", "--format=%H%x09%s"];
   if (since) args.push(`--since=${since}`);
-  args.push(from ? `${from}..${to}` : to);
+  args.push(from ? `${from}..${to}` : to, "--");
   return git(repo, args)
     .split("\n")
     .filter(Boolean)
@@ -62,13 +75,53 @@ export function firstParentCommits(repo: string, from: string | null, to: string
     });
 }
 
-/** The change a commit made to its first parent, without excluded paths (glob pathspecs). */
-export function commitDiff(repo: string, sha: string, excludes: string[]): string {
+const DIFF_FORMAT = [
+  "--no-color",
+  "--no-ext-diff",
+  "--no-textconv",
+  "--src-prefix=a/",
+  "--dst-prefix=b/",
+  "--submodule=short",
+  "-U3",
+];
+
+/**
+ * The commit's parents as recorded in the commit object itself. Unlike rev-list, this
+ * still shows the parent of a shallow clone's boundary commit, which git grafts as a root.
+ */
+function rawParents(repo: string, sha: string): string[] {
+  const header = git(repo, ["cat-file", "commit", sha]).split("\n\n")[0];
+  return header
+    .split("\n")
+    .filter((line) => line.startsWith("parent "))
+    .map((line) => line.slice("parent ".length).trim());
+}
+
+function isTooLarge(err: unknown): boolean {
+  const e = err as { code?: string; message?: string };
+  return e.code === "ENOBUFS" || /maxBuffer/i.test(e.message ?? "");
+}
+
+/**
+ * The change a commit made to its first parent, without excluded paths (glob pathspecs).
+ * Null means skip it: its first parent is missing (a shallow boundary) or the diff exceeds maxBytes.
+ */
+export function commitDiff(repo: string, sha: string, excludes: string[], maxBytes = 60_000): string | null {
   const spec = ["--", ".", ...excludes.map((e) => `:(exclude,glob)${e}`)];
-  const parent = tryGit(repo, ["rev-parse", "--verify", "--quiet", `${sha}^1`]);
-  return parent
-    ? git(repo, ["diff", "--no-color", "--no-ext-diff", "-U3", parent, sha, ...spec])
-    : git(repo, ["show", "--no-color", "--no-ext-diff", "--format=", sha, ...spec]);
+  const parents = rawParents(repo, sha);
+  let base: string;
+  if (parents.length === 0) {
+    base = git(repo, ["hash-object", "-t", "tree", "/dev/null"]).trim();
+  } else {
+    if (tryGit(repo, ["cat-file", "-e", `${parents[0]}^{commit}`]) === null) return null;
+    base = parents[0];
+  }
+  try {
+    return git(repo, ["diff", ...DIFF_FORMAT, base, sha, ...spec], { maxBuffer: maxBytes + 1 });
+  } catch (err) {
+    if (isTooLarge(err)) return null;
+    throw err;
+  }
 }
 
 export function fileAt(repo: string, rev: string, path: string): string | null {

@@ -1,5 +1,17 @@
+import fs from "node:fs";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { commitDiff, defaultBranch, firstParentCommits, isAncestor, mergeBase, revParse } from "../src/git.js";
+import {
+  commitDiff,
+  defaultBranch,
+  fetchQuietly,
+  fileAt,
+  firstParentCommits,
+  isAncestor,
+  mergeBase,
+  revParse,
+  toplevel,
+} from "../src/git.js";
 import { commit, makeRepo, sh, tempDir } from "./helpers.js";
 
 describe("git helpers", () => {
@@ -58,5 +70,123 @@ describe("git helpers", () => {
     const c = commit(repo, { "c.txt": "c\n" }, "c");
     expect(isAncestor(repo, b, c)).toBe(false);
     expect(mergeBase(repo, b, c)).toBe(a);
+  });
+
+  it("ignores the developer's global git config", () => {
+    expect(process.env.GIT_CONFIG_GLOBAL).toBe("/dev/null");
+    expect(process.env.GIT_CONFIG_NOSYSTEM).toBe("1");
+  });
+
+  it("returns false when fetching from a dead remote", () => {
+    const repo = makeRepo();
+    commit(repo, { "a.txt": "a\n" }, "first");
+    sh(repo, ["remote", "add", "origin", path.join(tempDir("codebrain-gone-"), "missing")]);
+    expect(fetchQuietly(repo)).toBe(false);
+  });
+
+  it("uses origin/HEAD when it is set", () => {
+    const repo = makeRepo();
+    commit(repo, { "a.txt": "a\n" }, "first");
+    sh(repo, ["branch", "-m", "main"]);
+    const bare = tempDir("codebrain-bare-");
+    sh(bare, ["init", "-q", "--bare", "-b", "main"]);
+    sh(repo, ["remote", "add", "origin", bare]);
+    sh(repo, ["push", "-q", "origin", "main"]);
+    sh(repo, ["remote", "set-head", "origin", "-a"]);
+    expect(sh(repo, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])).toBe("origin/main");
+    expect(defaultBranch(repo)).toBe("origin/main");
+  });
+
+  it("falls back to origin/main when origin/HEAD dangles", () => {
+    const repo = makeRepo();
+    commit(repo, { "a.txt": "a\n" }, "first");
+    sh(repo, ["branch", "-m", "main"]);
+    const bare = tempDir("codebrain-bare-");
+    sh(bare, ["init", "-q", "--bare", "-b", "main"]);
+    sh(repo, ["remote", "add", "origin", bare]);
+    sh(repo, ["push", "-q", "origin", "main"]);
+    sh(repo, ["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/master"]);
+    expect(defaultBranch(repo)).toBe("origin/main");
+  });
+
+  it("returns null for a shallow boundary commit instead of diffing the whole tree", () => {
+    const repo = makeRepo();
+    commit(repo, { "a.txt": "a\n" }, "first");
+    commit(repo, { "b.txt": "b\n" }, "second");
+    const clone = path.join(tempDir("codebrain-clone-"), "c");
+    sh(repo, ["clone", "-q", "--depth", "1", `file://${repo}`, clone]);
+    expect(commitDiff(clone, revParse(clone, "HEAD"), [])).toBeNull();
+  });
+
+  it("returns null when the diff is larger than maxBytes", () => {
+    const repo = makeRepo();
+    const sha = commit(repo, { "a.txt": "x".repeat(500) + "\n" }, "first");
+    expect(commitDiff(repo, sha, [], 100)).toBeNull();
+    expect(commitDiff(repo, sha, [])).toContain("a.txt");
+  });
+
+  it("keeps a/ b/ headers whatever the repo's diff config says", () => {
+    const repo = makeRepo();
+    const root = commit(repo, { "a.txt": "a\n" }, "first");
+    const next = commit(repo, { "a.txt": "b\n" }, "second");
+    sh(repo, ["config", "diff.noprefix", "true"]);
+    sh(repo, ["config", "diff.mnemonicPrefix", "true"]);
+    expect(commitDiff(repo, root, [])).toContain("diff --git a/a.txt b/a.txt");
+    expect(commitDiff(repo, next, [])).toContain("diff --git a/a.txt b/a.txt");
+  });
+
+  it("excludes a root-level file", () => {
+    const repo = makeRepo();
+    const sha = commit(repo, { "a.txt": "a\n", "package-lock.json": "{}\n" }, "first");
+    const diff = commitDiff(repo, sha, ["package-lock.json"]);
+    expect(diff).toContain("a.txt");
+    expect(diff).not.toContain("package-lock.json");
+  });
+
+  it("limits commits by date when there is no starting commit", () => {
+    const repo = makeRepo();
+    const saved = process.env.GIT_COMMITTER_DATE;
+    try {
+      process.env.GIT_COMMITTER_DATE = "2020-01-01T00:00:00Z";
+      commit(repo, { "a.txt": "a\n" }, "old");
+      process.env.GIT_COMMITTER_DATE = "2026-01-01T00:00:00Z";
+      commit(repo, { "b.txt": "b\n" }, "new");
+    } finally {
+      if (saved === undefined) delete process.env.GIT_COMMITTER_DATE;
+      else process.env.GIT_COMMITTER_DATE = saved;
+    }
+    expect(firstParentCommits(repo, null, "master").map((c) => c.title)).toEqual(["old", "new"]);
+    expect(firstParentCommits(repo, null, "master", "2025-01-01").map((c) => c.title)).toEqual(["new"]);
+  });
+
+  it("keeps a tab inside a title", () => {
+    const repo = makeRepo();
+    const sha = commit(repo, { "a.txt": "a\n" }, "fix:\tthing");
+    expect(firstParentCommits(repo, null, "master")).toEqual([{ sha, title: "fix:\tthing" }]);
+  });
+
+  it("is not confused by a file named like the branch", () => {
+    const repo = makeRepo();
+    const root = commit(repo, { "a.txt": "a\n" }, "first");
+    commit(repo, { master: "x\n" }, "add master file");
+    expect(firstParentCommits(repo, root, "master").map((c) => c.title)).toEqual(["add master file"]);
+  });
+
+  it("reads a file at a revision, or null when it is missing", () => {
+    const repo = makeRepo();
+    const first = commit(repo, { "src/a.txt": "one\n" }, "first");
+    commit(repo, { "src/a.txt": "two\n" }, "second");
+    expect(fileAt(repo, first, "src/a.txt")).toBe("one\n");
+    expect(fileAt(repo, "HEAD", "src/a.txt")).toBe("two\n");
+    expect(fileAt(repo, "HEAD", "src/missing.txt")).toBeNull();
+  });
+
+  it("finds the top level of a repo, or null outside one", () => {
+    const repo = makeRepo();
+    commit(repo, { "src/a.txt": "a\n" }, "first");
+    expect(toplevel(path.join(repo, "src"))).toBe(repo);
+    const outside = tempDir("codebrain-plain-");
+    fs.mkdirSync(path.join(outside, "x"));
+    expect(toplevel(path.join(outside, "x"))).toBeNull();
   });
 });
