@@ -10,6 +10,7 @@ import {
   connectRepo,
   findRepo,
   listCards,
+  listCardsReport,
   readCard,
   readJsonl,
   readState,
@@ -88,6 +89,20 @@ describe("store", () => {
     fs.writeFileSync(path.join(cards, "other.md"), serializeCard(card("two")));
     fs.writeFileSync(path.join(cards, "evil.md"), serializeCard(card("../evil")));
     expect(listCards(key).map((c) => c.id)).toEqual(["one"]);
+  });
+
+  it("reports unreadable card files alongside the readable ones", () => {
+    const key = connectRepo(repo);
+    writeCard(key, card("one"));
+    const cards = path.join(home, "repos", key, "cards");
+    fs.writeFileSync(path.join(cards, "broken.md"), "no front matter\n");
+    fs.writeFileSync(path.join(cards, "other.md"), serializeCard(card("two")));
+    const report = listCardsReport(key);
+    expect(report.cards.map((c) => c.id)).toEqual(["one"]);
+    expect(report.unreadable).toEqual([
+      { file: path.join(cards, "broken.md"), error: "missing front matter" },
+      { file: path.join(cards, "other.md"), error: 'card id "two" is unsafe or doesn\'t match its file name' },
+    ]);
   });
 
   it("throws when a card file's id doesn't match its name", () => {

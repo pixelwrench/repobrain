@@ -128,25 +128,37 @@ export function readCard(key: string, id: string): Card {
   return card;
 }
 
-export function listCards(key: string): Card[] {
+export interface CardListing {
+  cards: Card[];
+  /** Card files that couldn't be read (a broken edit, say), with why. `file` is the absolute path. */
+  unreadable: { file: string; error: string }[];
+}
+
+/** Every card file, split into the readable cards and the files that couldn't be read. */
+export function listCardsReport(key: string): CardListing {
   const dir = path.join(repoDir(key), "cards");
-  if (!fs.existsSync(dir)) return [];
-  return fs
-    .readdirSync(dir)
-    .filter((f) => f.endsWith(".md"))
-    .sort()
-    .flatMap((f) => {
-      try {
-        const card = parseCard(fs.readFileSync(path.join(dir, f), "utf8"));
-        if (!SAFE_ID.test(card.id) || `${card.id}.md` !== f) {
-          throw new Error(`card id ${JSON.stringify(card.id)} is unsafe or doesn't match its file name`);
-        }
-        return [card];
-      } catch (e) {
-        console.error(`codebrain: skipping ${f}: ${(e as Error).message}`);
-        return [];
+  const listing: CardListing = { cards: [], unreadable: [] };
+  if (!fs.existsSync(dir)) return listing;
+  for (const f of fs.readdirSync(dir).filter((f) => f.endsWith(".md")).sort()) {
+    const file = path.join(dir, f);
+    try {
+      const card = parseCard(fs.readFileSync(file, "utf8"));
+      if (!SAFE_ID.test(card.id) || `${card.id}.md` !== f) {
+        throw new Error(`card id ${JSON.stringify(card.id)} is unsafe or doesn't match its file name`);
       }
-    });
+      listing.cards.push(card);
+    } catch (e) {
+      listing.unreadable.push({ file, error: (e as Error).message });
+    }
+  }
+  return listing;
+}
+
+/** The readable cards; each unreadable file is skipped with a warning on stderr. */
+export function listCards(key: string): Card[] {
+  const { cards, unreadable } = listCardsReport(key);
+  for (const u of unreadable) console.error(`codebrain: skipping ${path.basename(u.file)}: ${u.error}`);
+  return cards;
 }
 
 export interface Lock {
