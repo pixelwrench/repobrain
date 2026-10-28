@@ -45,6 +45,12 @@ describe("anchors", () => {
     expect(makeAnchor(repo, sha, "src/c.ts", 1, 1, null)).toMatchObject({ startLine: 1, endLine: 1, lines: 1 });
   });
 
+  it("counts letters and digits in any script as meaningful", () => {
+    const repo = makeRepo();
+    const sha = commit(repo, { "src/名前.ts": "価格 = 税金 + 送料 + 手数料\n" }, "add");
+    expect(makeAnchor(repo, sha, "src/名前.ts", 1, 1, null)).toMatchObject({ startLine: 1, endLine: 1, lines: 1 });
+  });
+
   it("widens a trivial block, and gives up when the area stays trivial", () => {
     const repo = makeRepo();
     const sha = commit(repo, { "src/ref.ts": FILE, "src/braces.ts": "{\n  {\n  }\n  });\n}\n})\n" }, "add");

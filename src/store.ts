@@ -129,7 +129,11 @@ export function listCards(key: string): Card[] {
     .sort()
     .flatMap((f) => {
       try {
-        return [parseCard(fs.readFileSync(path.join(dir, f), "utf8"))];
+        const card = parseCard(fs.readFileSync(path.join(dir, f), "utf8"));
+        if (!SAFE_ID.test(card.id) || `${card.id}.md` !== f) {
+          throw new Error(`card id ${JSON.stringify(card.id)} is unsafe or doesn't match its file name`);
+        }
+        return [card];
       } catch (e) {
         console.error(`codebrain: skipping ${f}: ${(e as Error).message}`);
         return [];
@@ -176,9 +180,12 @@ export function acquireLock(key: string, staleMs = 15 * 60_000): Lock | null {
       if (ours()) fs.rmSync(file, { force: true });
     },
     refresh: () => {
-      if (ours()) {
-        const now = new Date();
+      if (!ours()) return;
+      const now = new Date();
+      try {
         fs.utimesSync(file, now, now);
+      } catch (e) {
+        if (!isEnoent(e)) throw e; // released or reclaimed meanwhile
       }
     },
   };

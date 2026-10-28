@@ -11,7 +11,7 @@ import { createHash } from "node:crypto";
 import type { Anchor, AnchorStatus } from "./format.js";
 import { fileAt } from "./git.js";
 
-/** A block needs at least this many identifier characters to be worth anchoring. */
+/** A block needs at least this many letters, digits or underscores (any script) to be worth anchoring. */
 const MIN_WORD_CHARS = 8;
 /** How far makeAnchor widens a trivial block, in lines. */
 const MAX_WIDENED_LINES = 5;
@@ -31,7 +31,7 @@ export function fingerprintOf(lines: string[]): string {
 
 function wordChars(lines: string[]): number {
   let n = 0;
-  for (const l of lines) n += l.replace(/[^A-Za-z0-9_]/g, "").length;
+  for (const l of lines) n += l.replace(/[^\p{L}\p{N}_]/gu, "").length;
   return n;
 }
 
@@ -70,7 +70,11 @@ export function makeAnchor(repo: string, commit: string, path: string, startLine
 
 /** Whether the anchored block still exists anywhere in the file at `rev`. */
 export function checkAnchor(repo: string, rev: string, anchor: Anchor): AnchorStatus {
-  const content = fileAt(repo, rev, anchor.path);
+  return anchorStatusIn(fileAt(repo, rev, anchor.path), anchor);
+}
+
+/** Whether the anchored block exists in `content` (the file's text, or null when the file is gone). */
+export function anchorStatusIn(content: string | null, anchor: Anchor): AnchorStatus {
   if (content === null) return "orphaned";
   const lines = normalizedLines(content);
   const k = anchor.lines;

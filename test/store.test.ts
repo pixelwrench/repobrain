@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { serializeCard, type Card } from "../src/format.js";
 import {
   acquireLock,
@@ -81,6 +81,15 @@ describe("store", () => {
     expect(cardPath(key, "ok-1.2_x")).toMatch(/ok-1\.2_x\.md$/);
   });
 
+  it("lists only cards whose id is safe and matches the file name", () => {
+    const key = connectRepo(repo);
+    writeCard(key, card("one"));
+    const cards = path.join(home, "repos", key, "cards");
+    fs.writeFileSync(path.join(cards, "other.md"), serializeCard(card("two")));
+    fs.writeFileSync(path.join(cards, "evil.md"), serializeCard(card("../evil")));
+    expect(listCards(key).map((c) => c.id)).toEqual(["one"]);
+  });
+
   it("throws when a card file's id doesn't match its name", () => {
     const key = connectRepo(repo);
     fs.writeFileSync(cardPath(key, "other"), serializeCard(card("one")));
@@ -157,6 +166,20 @@ describe("store", () => {
       expect(fs.statSync(lockFile).mtimeMs).toBeCloseTo(past.getTime(), -3);
       reclaimer.release();
       expect(fs.existsSync(lockFile)).toBe(false);
+    });
+
+    it("refresh ignores a lock file that vanishes mid-refresh", () => {
+      const lock = acquireLock(key)!;
+      const enoent = Object.assign(new Error("gone"), { code: "ENOENT" });
+      const spy = vi.spyOn(fs, "utimesSync").mockImplementation(() => {
+        throw enoent;
+      });
+      try {
+        expect(() => lock.refresh()).not.toThrow();
+      } finally {
+        spy.mockRestore();
+      }
+      lock.release();
     });
 
     it("refresh touches the lock's mtime", () => {

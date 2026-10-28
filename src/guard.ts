@@ -63,22 +63,30 @@ function unquote(s: string): string {
   return Buffer.from(bytes).toString("utf8");
 }
 
-/** Every path a file section mentions: diff --git, rename/copy, and ---/+++ lines. */
-function sectionPaths(header: string): string[] {
-  const paths: string[] = [];
-  const stripPrefix = (p: string) => p.replace(/^[ab]\//, "");
-  const lines = header.split("\n");
-  const git = lines[0]!.slice("diff --git ".length);
+const stripPrefix = (p: string) => p.replace(/^[ab]\//, "");
+
+/** The old and new paths on a section's `diff --git` line (one path when an unquoted name has spaces). */
+function gitLinePaths(firstLine: string): string[] {
+  const git = firstLine.slice("diff --git ".length);
   const quoted = /^("(?:[^"\\]|\\.)*"|\S+) ("(?:[^"\\]|\\.)*"|\S+)$/.exec(git);
   if (quoted && (quoted[1]!.startsWith('"') || quoted[2]!.startsWith('"') || /^a\//.test(quoted[1]!))) {
-    paths.push(stripPrefix(unquote(quoted[1]!)), stripPrefix(unquote(quoted[2]!)));
-  } else if (git.startsWith("a/")) {
+    return [stripPrefix(unquote(quoted[1]!)), stripPrefix(unquote(quoted[2]!))];
+  }
+  if (git.startsWith("a/")) {
     // Unquoted paths with spaces: when both sides are the same path, split in half.
     const half = (git.length - 1) / 2;
     if (Number.isInteger(half) && git[half] === " " && git.slice(half + 1).startsWith("b/") && git.slice(2, half) === git.slice(half + 3)) {
-      paths.push(git.slice(2, half));
+      return [git.slice(2, half)];
     }
   }
+  return [];
+}
+
+type HeaderPath = { kind: "rename from" | "rename to" | "copy from" | "copy to" | "---" | "+++"; path: string };
+
+/** Paths on rename/copy and ---/+++ lines; /dev/null is left out. */
+function headerPaths(lines: string[]): HeaderPath[] {
+  const out: HeaderPath[] = [];
   for (const line of lines.slice(1)) {
     const m = /^(rename from|rename to|copy from|copy to|---|\+\+\+) (.+)$/.exec(line);
     if (!m) continue;
@@ -87,9 +95,37 @@ function sectionPaths(header: string): string[] {
       if (p === "/dev/null") continue;
       p = stripPrefix(p);
     }
-    paths.push(p);
+    out.push({ kind: m[1] as HeaderPath["kind"], path: p });
   }
+  return out;
+}
+
+/** Every path a file section mentions: diff --git, rename/copy, and ---/+++ lines. */
+function sectionPaths(header: string): string[] {
+  const lines = header.split("\n");
+  const paths = [...gitLinePaths(lines[0]!), ...headerPaths(lines).map((h) => h.path)];
   return paths.filter((p) => p.length > 0);
+}
+
+/** The path a file section is about after the change: the new path, or the old one for a deletion. */
+function sectionTarget(header: string): string | null {
+  const lines = header.split("\n");
+  const named = headerPaths(lines);
+  const pick = (kind: HeaderPath["kind"]) => named.find((h) => h.kind === kind)?.path;
+  const fromGit = gitLinePaths(lines[0]!);
+  const p = pick("+++") ?? pick("---") ?? pick("rename to") ?? pick("copy to") ?? fromGit[fromGit.length - 1];
+  return p && p.length > 0 ? p : null;
+}
+
+/** The files in a diff (such as filterDiff's output), by their path after the change, in order and without repeats. */
+export function diffPaths(diff: string): string[] {
+  const out: string[] = [];
+  for (const file of diff.split(/^(?=diff --git )/m)) {
+    if (!file.startsWith("diff --git ")) continue;
+    const p = sectionTarget(file.split(/^(?=@@ )/m)[0]!);
+    if (p !== null && !out.includes(p)) out.push(p);
+  }
+  return out;
 }
 
 export interface FilteredDiff {

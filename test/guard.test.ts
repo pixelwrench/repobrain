@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { filterDiff, findSecrets, rebalanceAnswers, validateCard } from "../src/guard.js";
+import { diffPaths, filterDiff, findSecrets, rebalanceAnswers, validateCard } from "../src/guard.js";
 import type { CardBody } from "../src/format.js";
 
 // Built by concatenation so secret scanners don't flag this repo.
@@ -321,5 +321,20 @@ describe("pathological input", () => {
     const [out, ms] = timed(() => filterDiff(diff));
     expect(out).toEqual({ diff, droppedHunks: 0, droppedFiles: 0 });
     expect(ms).toBeLessThan(200);
+  });
+});
+
+describe("diffPaths", () => {
+  it("lists new paths, old paths for deletions, renames and quoted names", () => {
+    const d = [
+      "diff --git a/src/a.ts b/src/a.ts", "index 1..2 100644", "--- a/src/a.ts", "+++ b/src/a.ts", "@@ -1 +1 @@", "-x", "+y",
+      "diff --git a/src/gone.ts b/src/gone.ts", "deleted file mode 100644", "index 1..0", "--- a/src/gone.ts", "+++ /dev/null", "@@ -1 +0,0 @@", "-x",
+      "diff --git a/old.ts b/new.ts", "similarity index 100%", "rename from old.ts", "rename to new.ts",
+      'diff --git "a/caf\\303\\251.ts" "b/caf\\303\\251.ts"', "new file mode 100644", "--- /dev/null", '+++ "b/caf\\303\\251.ts"', "@@ -0,0 +1 @@", "+z",
+      "diff --git a/my file.ts b/my file.ts", "old mode 100644", "new mode 100755",
+      "",
+    ].join("\n");
+    expect(diffPaths(d)).toEqual(["src/a.ts", "src/gone.ts", "new.ts", "café.ts", "my file.ts"]);
+    expect(diffPaths("")).toEqual([]);
   });
 });
