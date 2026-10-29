@@ -87,16 +87,19 @@ const FILE = ["export function applyReferral(code: string) {", "  const ref = lo
 const cardFor = (p: string, over: Record<string, unknown> = {}) => ({
   kind: "flashcard", front: `What lives in ${p}?`, back: "The referral lookup.", path: p, startLine: 1, endLine: 5, symbol: null, ...over,
 });
-const fake = (p = "src/ref.ts"): RunClaude => async () => JSON.stringify([cardFor(p)]);
+const reply = (text: string, costUsd: number | null = null) => ({ text, costUsd });
+const fake = (p = "src/ref.ts"): RunClaude => async () => reply(JSON.stringify([cardFor(p)]));
 const fakeTwo = (p = "src/ref.ts"): RunClaude => async () =>
-  JSON.stringify([cardFor(p), cardFor(p, { front: `Why does ${p} return null?`, startLine: 2, endLine: 4 })]);
-const empty: RunClaude = async () => "[]";
+  reply(JSON.stringify([cardFor(p), cardFor(p, { front: `Why does ${p} return null?`, startLine: 2, endLine: 4 })]));
+const empty: RunClaude = async () => reply("[]");
 const fakeThree = (p = "src/ref.ts"): RunClaude => async () =>
-  JSON.stringify([
-    cardFor(p),
-    cardFor(p, { front: `Why does ${p} return null?`, startLine: 2, endLine: 4 }),
-    cardFor(p, { front: `What does ${p} call to apply a discount?`, startLine: 4, endLine: 4 }),
-  ]);
+  reply(
+    JSON.stringify([
+      cardFor(p),
+      cardFor(p, { front: `Why does ${p} return null?`, startLine: 2, endLine: 4 }),
+      cardFor(p, { front: `What does ${p} call to apply a discount?`, startLine: 4, endLine: 4 }),
+    ]),
+  );
 const failing = (make: () => Error = () => new ClaudeLimitError("claude timed out")): RunClaude => async () => {
   throw make();
 };
@@ -157,10 +160,41 @@ describe("runCapture", () => {
     await runCapture(key, opts(fake()));
     commit(repo, { "src/ref.ts": FILE, "package-lock.json": "{}\n" }, "feat: referral codes");
     let stdin = "";
-    await runCapture(key, opts(async (_p, s) => ((stdin = s), JSON.stringify([cardFor("src/ref.ts")]))));
+    await runCapture(key, opts(async (_p, s) => ((stdin = s), reply(JSON.stringify([cardFor("src/ref.ts")])))));
     expect(stdin).toMatch(/^Title: feat: referral codes\n/);
     expect(stdin).toContain("src/ref.ts");
     expect(stdin).not.toContain("package-lock.json");
+  });
+
+  it("logs each merge's cost and reports the sum of the known costs", async () => {
+    await runCapture(key, opts(fake()));
+    const a = commit(repo, { "src/ref.ts": FILE }, "feat: one");
+    const b = commit(repo, { "src/two.ts": FILE }, "feat: two");
+    const c = commit(repo, { "src/three.ts": FILE }, "feat: three");
+    const costs = new Map([["src/ref.ts", 0.01234], ["src/two.ts", 0.02]]);
+    const run: RunClaude = async (_p, s) => {
+      const p = ["src/ref.ts", "src/two.ts", "src/three.ts"].find((f) => s.includes(f))!;
+      return reply(JSON.stringify([cardFor(p)]), costs.get(p) ?? null);
+    };
+    const report = await runCapture(key, opts(run));
+    expect(report).toMatchObject({ status: "done", processed: 3, costUsd: 0.0323 });
+    expect(log()).toMatch(new RegExp(`${a} 1 cards, 0 rejected, cost \\$0\\.01234`));
+    expect(log()).toMatch(new RegExp(`${b} 1 cards, 0 rejected, cost \\$0\\.02`));
+    expect(log()).toContain(`${c} 1 cards, 0 rejected, cost unknown`);
+  });
+
+  it("reports a null cost when no cost is known", async () => {
+    expect((await runCapture(key, opts(fake()))).costUsd).toBeNull();
+    commit(repo, { "src/ref.ts": FILE }, "feat");
+    expect((await runCapture(key, opts(fake()))).costUsd).toBeNull();
+  });
+
+  it("logs the cost of a merge skipped for running over budget, and counts it", async () => {
+    await runCapture(key, opts(fake()));
+    const sha = commit(repo, { "src/ref.ts": FILE }, "feat");
+    const report = await runCapture(key, opts(failing(() => new ClaudeResultError("error_max_budget_usd", "over", 0.51))));
+    expect(report).toMatchObject({ skipped: 1, costUsd: 0.51 });
+    expect(log()).toMatch(new RegExp(`${sha} skipped \\(over budget, cost \\$0\\.51`));
   });
 
   it("processes recent history with --since on the first run", async () => {
@@ -263,7 +297,7 @@ describe("runCapture", () => {
     commit(repo, { "src/ref.ts": FILE }, "feat: referral codes");
     await runCapture(key, opts(failing(() => new ClaudeEnvError("offline"))));
     expect((readState(key) as RepoState).unavailable?.message).toBe("offline");
-    await runCapture(key, opts(async () => "no idea"));
+    await runCapture(key, opts(async () => reply("no idea")));
     expect((readState(key) as RepoState).unavailable).toBeUndefined();
   });
 
@@ -302,7 +336,7 @@ describe("runCapture", () => {
     const head = sh(repo, ["rev-parse", "HEAD"]);
     fs.writeFileSync(path.join(repoDir(key), "state.json"), JSON.stringify({ lastSha: "deadbeef".repeat(5), updatedAt: null }));
     let called = false;
-    const report = await runCapture(key, opts(async () => ((called = true), "[]")));
+    const report = await runCapture(key, opts(async () => ((called = true), reply("[]"))));
     expect(report.status).toBe("initialized");
     expect(called).toBe(false);
     expect(readState(key).lastSha).toBe(head);
@@ -369,7 +403,7 @@ describe("runCapture", () => {
     await runCapture(key, opts(fake()));
     fs.writeFileSync(path.join(repoDir(key), "state.json"), JSON.stringify({ lastSha: init, updatedAt: null }));
     let called = false;
-    await runCapture(key, opts(async () => ((called = true), "[]")));
+    await runCapture(key, opts(async () => ((called = true), reply("[]"))));
     expect(called).toBe(false);
   });
 
@@ -419,7 +453,7 @@ describe("runCapture", () => {
   it("skips a merge whose model output is unusable", async () => {
     await runCapture(key, opts(fake()));
     const sha = commit(repo, { "src/ref.ts": FILE }, "feat: referral codes");
-    const report = await runCapture(key, opts(async () => "no idea"));
+    const report = await runCapture(key, opts(async () => reply("no idea")));
     expect(report).toMatchObject({ status: "done", skipped: 1 });
     expect(readState(key).lastSha).toBe(sha);
   });
@@ -427,7 +461,7 @@ describe("runCapture", () => {
   it("logs why drafted cards were rejected", async () => {
     await runCapture(key, opts(fake()));
     commit(repo, { "src/ref.ts": FILE }, "feat: referral codes");
-    const run: RunClaude = async () => JSON.stringify([cardFor("src/elsewhere.ts"), cardFor("src/ref.ts", { startLine: 50, endLine: 60 })]);
+    const run: RunClaude = async () => reply(JSON.stringify([cardFor("src/elsewhere.ts"), cardFor("src/ref.ts", { startLine: 50, endLine: 60 })]));
     expect(await runCapture(key, opts(run))).toMatchObject({ processed: 1, cardsWritten: 0 });
     expect(log()).toContain("path not in the diff: src/elsewhere.ts");
     expect(log()).toContain("no usable anchor at src/ref.ts:50-60");
@@ -445,7 +479,7 @@ describe("runCapture", () => {
     await runCapture(key, opts(fake()));
     const sha = commit(repo, { "src/ref.ts": FILE }, "feat: referral codes");
     let called = false;
-    const run: RunClaude = async () => ((called = true), "[]");
+    const run: RunClaude = async () => ((called = true), reply("[]"));
     expect((await runCapture(key, opts(run, { maxDiffBytes: 50 }))).skipped).toBe(1);
     expect(called).toBe(false);
     expect(readState(key).lastSha).toBe(sha);
@@ -549,7 +583,7 @@ describe("runCapture", () => {
     fs.writeFileSync(path.join(repo, ".codebrain", "ignore"), "# comment\n/secrets/**\n!keep.txt\n:(top)other\n");
     commit(repo, { "src/ref.ts": FILE, "secrets/notes.txt": "private\n", ".codebrain/ignore": fs.readFileSync(path.join(repo, ".codebrain", "ignore"), "utf8") }, "feat");
     let stdin = "";
-    const report = await runCapture(key, opts(async (_p, s) => ((stdin = s), JSON.stringify([cardFor("src/ref.ts")]))));
+    const report = await runCapture(key, opts(async (_p, s) => ((stdin = s), reply(JSON.stringify([cardFor("src/ref.ts")])))));
     expect(report).toMatchObject({ status: "done", cardsWritten: 1 });
     expect(stdin).toContain("src/ref.ts");
     expect(stdin).not.toContain("secrets/notes.txt");
@@ -564,7 +598,7 @@ describe("runCapture", () => {
     commit(repo, { "src/ref.ts": FILE, "secrets/notes.txt": "private\n", ".codebrain/ignore": ignore }, "feat");
     hooks.rejectPathspec = "weird/**";
     let stdin = "";
-    const report = await runCapture(key, opts(async (_p, s) => ((stdin = s), JSON.stringify([cardFor("src/ref.ts")]))));
+    const report = await runCapture(key, opts(async (_p, s) => ((stdin = s), reply(JSON.stringify([cardFor("src/ref.ts")])))));
     expect(report).toMatchObject({ status: "done", cardsWritten: 1 });
     expect(stdin).not.toContain("secrets/notes.txt");
     expect(log()).toContain('ignore line dropped: "../outside/**" (a .. segment');

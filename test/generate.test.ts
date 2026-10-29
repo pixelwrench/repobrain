@@ -33,7 +33,7 @@ function setup(title = "feat: referral codes"): DraftInput {
   return { repoPath: repo, repoName: "demo", merge: sha, title, diff: "diff", files: ["src/ref.ts", "src/gone.ts"], areaDepth: 3, now: new Date("2026-11-02T09:00:00Z") };
 }
 
-const reply = (cards: unknown) => async () => JSON.stringify(cards);
+const reply = (cards: unknown, costUsd: number | null = null) => async () => ({ text: JSON.stringify(cards), costUsd });
 
 describe("draftCards", () => {
   it("validates, anchors and rebalances drafted cards", async () => {
@@ -42,7 +42,7 @@ describe("draftCards", () => {
     const withUrl = { ...good, explanation: "See https://example.com" };
     const notInDiff = { ...good, path: "src/nope.ts" };
     const notInCommit = { ...good, path: "src/gone.ts" };
-    const run = async () => "Here you go:\n" + JSON.stringify([good, flash, withUrl, notInDiff, notInCommit]);
+    const run = async () => ({ text: "Here you go:\n" + JSON.stringify([good, flash, withUrl, notInDiff, notInCommit]), costUsd: null });
     const out = await draftCards(input, run);
     expect(out.cards).toHaveLength(2);
     expect(out.rejected.map((r) => r.reason).join("|")).toMatch(/URL.*\|path not in the diff: src\/nope\.ts\|no usable anchor at src\/gone\.ts:1-5$/);
@@ -59,7 +59,7 @@ describe("draftCards", () => {
     let seen = { prompt: "", stdin: "" };
     await draftCards({ ...input, diff: "diff --git a/src/ref.ts b/src/ref.ts" }, async (prompt, stdin) => {
       seen = { prompt, stdin };
-      return "[]";
+      return { text: "[]", costUsd: null };
     });
     expect(seen.prompt).not.toContain("ignore previous");
     expect(seen.prompt).toBe(buildPrompt());
@@ -69,8 +69,16 @@ describe("draftCards", () => {
     expect(rest.join("\n")).toContain("diff --git a/src/ref.ts b/src/ref.ts");
   });
 
+  it("passes the call's cost through, and keeps it on an unusable reply", async () => {
+    expect((await draftCards(setup(), reply([good], 0.0183))).costUsd).toBe(0.0183);
+    expect((await draftCards(setup(), reply([]))).costUsd).toBeNull();
+    const e = await draftCards(setup(), async () => ({ text: "no cards", costUsd: 0.01 })).catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(ModelOutputError);
+    expect((e as ModelOutputError).costUsd).toBe(0.01);
+  });
+
   it("throws ModelOutputError when there is no JSON array", async () => {
-    await expect(draftCards(setup(), async () => "no cards, sorry")).rejects.toThrow(ModelOutputError);
+    await expect(draftCards(setup(), async () => ({ text: "no cards, sorry", costUsd: null }))).rejects.toThrow(ModelOutputError);
   });
 
   it("rejects a merge that isn't a full SHA", async () => {
@@ -235,7 +243,7 @@ describe("runClaude with a fake claude", () => {
     Object.assign(process.env, { CLAUDECODE: "1", CLAUDE_CODE_ENTRYPOINT: "cli", CLAUDE_CODE_OAUTH_TOKEN: "kept", CLAUDE_EFFORT: "max" });
     try {
       const out = await createRunClaude()("prompt", "stdin");
-      expect(out).toBe(`${path.join(home, "run")}|1|unset|unset|kept|unset`);
+      expect(out.text).toBe(`${path.join(home, "run")}|1|unset|unset|kept|unset`);
     } finally {
       for (const k of ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_EFFORT"]) {
         if (saved[k] === undefined) delete process.env[k];
@@ -244,9 +252,21 @@ describe("runClaude with a fake claude", () => {
     }
   });
 
+  it("returns claude's total_cost_usd with the reply", async () => {
+    fake(`printf '%s' '{"type":"result","subtype":"success","is_error":false,"result":"[]","total_cost_usd":0.0183}'`);
+    await expect(createRunClaude()("p", "s")).resolves.toEqual({ text: "[]", costUsd: 0.0183 });
+  });
+
+  it("gives a null cost when total_cost_usd is missing or not a number", async () => {
+    fake(`printf '%s' '{"type":"result","subtype":"success","is_error":false,"result":"[]"}'`);
+    await expect(createRunClaude()("p", "s")).resolves.toEqual({ text: "[]", costUsd: null });
+    fake(`printf '%s' '{"type":"result","subtype":"success","is_error":false,"result":"[]","total_cost_usd":"0.02"}'`);
+    await expect(createRunClaude()("p", "s")).resolves.toEqual({ text: "[]", costUsd: null });
+  });
+
   it("accepts the array form of the output", async () => {
     fake(`printf '[{"type":"system"},${ok("[]")}]'`);
-    await expect(createRunClaude()("p", "s")).resolves.toBe("[]");
+    await expect(createRunClaude()("p", "s")).resolves.toEqual({ text: "[]", costUsd: null });
   });
 
   it.each([
@@ -271,6 +291,7 @@ describe("runClaude with a fake claude", () => {
     const e = await createRunClaude()("p", "s").catch((x: unknown) => x);
     expect(e).toBeInstanceOf(ClaudeResultError);
     expect((e as ClaudeResultError).subtype).toBe("error_max_budget_usd");
+    expect((e as ClaudeResultError).costUsd).toBe(0.51);
   });
 
   const apiError = (status: number, text: string) =>
@@ -330,7 +351,7 @@ describe("runClaude with a fake claude", () => {
   it("cleans up stray grandchildren after a normal exit", { timeout: 10_000 }, async () => {
     const marker = path.join(bin, "stray-alive");
     fake(`(sleep 1; touch '${marker}') >/dev/null 2>&1 </dev/null & printf '${ok("[]")}'`);
-    await expect(createRunClaude()("p", "s")).resolves.toBe("[]");
+    await expect(createRunClaude()("p", "s")).resolves.toEqual({ text: "[]", costUsd: null });
     await new Promise((r) => setTimeout(r, 1500));
     expect(fs.existsSync(marker)).toBe(false);
   });
@@ -348,7 +369,7 @@ describe("runClaude with a fake claude", () => {
   it("settles when a grandchild holds the pipes open after claude exits", { timeout: 10_000 }, async () => {
     fake(`sleep 30 & printf '${ok("[]")}'; exit 0`);
     const started = Date.now();
-    await expect(createRunClaude({ timeoutMs: 20_000, closeGraceMs: 200 })("p", "s")).resolves.toBe("[]");
+    await expect(createRunClaude({ timeoutMs: 20_000, closeGraceMs: 200 })("p", "s")).resolves.toEqual({ text: "[]", costUsd: null });
     expect(Date.now() - started).toBeLessThan(1500);
   });
 
@@ -359,6 +380,6 @@ describe("runClaude with a fake claude", () => {
 
   it("doesn't fail when claude exits without reading stdin", async () => {
     fake(`printf '${ok("[]")}'`);
-    await expect(createRunClaude()("p", "x".repeat(4_000_000))).resolves.toBe("[]");
+    await expect(createRunClaude()("p", "x".repeat(4_000_000))).resolves.toEqual({ text: "[]", costUsd: null });
   });
 });

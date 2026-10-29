@@ -9,11 +9,13 @@ import { cardPath, home, listCards, readCard, readJsonl, readState, repoDir, wri
 import { commit, makeRepo, sh, tempDir, useTempHome } from "./helpers.js";
 
 const FILE = ["export function applyReferral(code: string) {", "  const ref = lookup(code);", "  if (!ref) return null;", "  return discount(ref);", "}", ""].join("\n");
-const run: RunClaude = async () =>
-  JSON.stringify([
+const run: RunClaude = async () => ({
+  text: JSON.stringify([
     { kind: "mcq", question: "What does applyReferral return for an unknown code?", choices: ["null", "an error", "zero", "the code"], correct: "A", explanation: "It returns null when lookup finds nothing.", path: "src/ref.ts", startLine: 1, endLine: 5, symbol: "applyReferral" },
     { kind: "flashcard", front: "Where are referral codes looked up?", back: "`lookup`, called by `applyReferral`", path: "src/ref.ts", startLine: 2, endLine: 4, symbol: "lookup" },
-  ]);
+  ]),
+  costUsd: null,
+});
 const now = () => new Date("2026-11-02T09:00:00Z");
 
 describe("cli", () => {

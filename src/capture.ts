@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { locateAnchor, type AnchorMatch } from "./anchor.js";
 import type { Anchor, Card } from "./format.js";
-import { ClaudeEnvError, ClaudeLimitError, ClaudeResultError, draftCards, ModelOutputError, runClaude, type RunClaude } from "./generate.js";
+import { ClaudeEnvError, ClaudeLimitError, ClaudeResultError, costLabel, draftCards, ModelOutputError, runClaude, totalCost, type RunClaude } from "./generate.js";
 import { commitDiff, defaultBranch, fetchQuietly, fileAt, firstParentCommits, git, isAncestor, mergeBase, resolveCommit, toplevel } from "./git.js";
 import { diffPaths, filterDiff } from "./guard.js";
 import { acquireLock, appendLog, cardPath, listCards, loadConfig, readCard, readState, writeCard, writeState, type RepoConfig, type RepoState } from "./store.js";
@@ -39,6 +39,8 @@ export interface CaptureReport {
   cardsWritten: number;
   skipped: number;
   anchorsUpdated: number;
+  /** What this run's claude calls cost, summed from the costs claude reported; null when none was reported. */
+  costUsd: number | null;
   error?: string;
 }
 
@@ -152,7 +154,7 @@ function recordError(key: string, msg: string, at: Date): void {
 async function capture(key: string, opts: CaptureOptions): Promise<CaptureReport> {
   const repo = loadConfig().repos[key];
   if (!repo) throw new Error(`unknown repo ${key}; run codebrain connect first`);
-  const report: CaptureReport = { status: "done", processed: 0, cardsWritten: 0, skipped: 0, anchorsUpdated: 0 };
+  const report: CaptureReport = { status: "done", processed: 0, cardsWritten: 0, skipped: 0, anchorsUpdated: 0, costUsd: null };
   const lock = acquireLock(key);
   if (!lock) return { ...report, status: "locked" };
   const now = opts.now ?? (() => new Date());
@@ -217,6 +219,12 @@ async function captureMerges(
     delete state.failures;
     save(sha);
   };
+  const costs: (number | null)[] = [];
+  /** Counts a call's cost into the report, which every return path below carries. */
+  const spent = (costUsd: number | null) => {
+    costs.push(costUsd);
+    report.costUsd = totalCost(costs);
+  };
   const fail = (msg: string): CaptureReport => {
     state.lastError = { at: now().toISOString(), message: msg.slice(0, 500) };
     writeState(key, state);
@@ -264,15 +272,15 @@ async function captureMerges(
       finish(commit.sha);
     };
     /** A failure caused by this merge: retried next run, and skipped on the third in a row. */
-    const strike = (msg: string): CaptureReport | null => {
+    const strike = (msg: string, cost = ""): CaptureReport | null => {
       const count = state.failures?.sha === commit.sha ? state.failures.count + 1 : 1;
       if (count >= MAX_FAILURES) {
-        skip(`failed ${count} times: ${msg}`);
+        skip(`failed ${count} times${cost}: ${msg}`);
         return null;
       }
       state.failures = { sha: commit.sha, count };
       writeState(key, state);
-      appendLog(key, `${commit.sha} failed (attempt ${count} of ${MAX_FAILURES}): ${msg}`);
+      appendLog(key, `${commit.sha} failed (attempt ${count} of ${MAX_FAILURES})${cost}: ${msg}`);
       return { ...report, status: "failed", error: msg };
     };
     let raw: string | null;
@@ -313,7 +321,8 @@ async function captureMerges(
       const msg = message(e);
       if (e instanceof ModelOutputError) {
         delete state.unavailable; // claude answered, just not usefully
-        skip(msg);
+        spent(e.costUsd);
+        skip(`${msg}, ${costLabel(e.costUsd)}`);
         continue;
       }
       if (!(e instanceof ClaudeResultError || e instanceof ClaudeLimitError)) {
@@ -327,17 +336,21 @@ async function captureMerges(
       }
       // claude ran and failed this merge, so it isn't unavailable.
       delete state.unavailable;
+      const cost = e instanceof ClaudeResultError ? e.costUsd : null;
+      spent(cost);
       // Retrying a merge that hit the budget would spend the same again for nothing.
       if (e instanceof ClaudeResultError && e.subtype === "error_max_budget_usd") {
-        skip(`over budget: ${msg.slice(0, 200)}`);
+        skip(`over budget, ${costLabel(cost)}: ${msg.slice(0, 200)}`);
         continue;
       }
-      const stopped = strike(msg);
+      // A timeout or the output cap leaves no result, so there's no cost to log.
+      const stopped = strike(msg, e instanceof ClaudeResultError ? `, ${costLabel(cost)}` : "");
       if (stopped) return stopped;
       continue;
     }
     delete state.unavailable;
-    const { cards, rejected } = drafted;
+    const { cards, rejected, costUsd } = drafted;
+    spent(costUsd);
     let written = 0;
     for (const card of cards) {
       if (!mayWrite(key, card.id)) {
@@ -349,7 +362,7 @@ async function captureMerges(
     }
     report.processed++;
     report.cardsWritten += written;
-    appendLog(key, `${commit.sha} ${written} cards, ${rejected.length} rejected${rejected.length ? `: ${rejected.map((r) => r.reason).join(" | ")}` : ""}`);
+    appendLog(key, `${commit.sha} ${written} cards, ${rejected.length} rejected, ${costLabel(costUsd)}${rejected.length ? `: ${rejected.map((r) => r.reason).join(" | ")}` : ""}`);
     // Only now, with every card file written, does the merge count as processed.
     finish(commit.sha);
   }

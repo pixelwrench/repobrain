@@ -6,17 +6,28 @@ import { areaOf, LETTERS, oneLine, type Card, type CardBody } from "./format.js"
 import { rebalanceAnswers, validateCard } from "./guard.js";
 import { home } from "./store.js";
 
-/** Sends a prompt plus stdin to a model and returns its text reply. Injected in tests. */
-export type RunClaude = (prompt: string, stdin: string) => Promise<string>;
+/** A model's text reply, with what the call cost when claude reported it (`total_cost_usd`), else null. */
+export interface ClaudeReply {
+  text: string;
+  costUsd: number | null;
+}
+
+/** Sends a prompt plus stdin to a model and returns its reply. Injected in tests. */
+export type RunClaude = (prompt: string, stdin: string) => Promise<ClaudeReply>;
 
 /** The model's reply had no usable JSON array. Capture skips the merge rather than retrying it forever. */
-export class ModelOutputError extends Error {}
+export class ModelOutputError extends Error {
+  /** What the call that produced the reply cost, when known. */
+  costUsd: number | null = null;
+}
 
 /** claude ran and reported a failed result (is_error, or a subtype other than success), such as a budget overrun. */
 export class ClaudeResultError extends Error {
   constructor(
     readonly subtype: string,
     message: string,
+    /** What the failed call cost, when claude reported it. */
+    readonly costUsd: number | null = null,
   ) {
     super(message);
   }
@@ -29,6 +40,15 @@ export class ClaudeLimitError extends Error {}
 export class ClaudeEnvError extends Error {}
 
 export const MAX_CARDS = 5;
+
+/** The sum of the known costs, rounded to 4 decimals, or null when none is known. Unknown costs are never guessed. */
+export function totalCost(costs: (number | null)[]): number | null {
+  const known = costs.filter((c): c is number => c !== null);
+  return known.length === 0 ? null : Math.round(known.reduce((a, b) => a + b, 0) * 10_000) / 10_000;
+}
+
+/** A cost for a log line: "cost $0.0183", or "cost unknown". */
+export const costLabel = (costUsd: number | null): string => (costUsd === null ? "cost unknown" : `cost $${costUsd}`);
 
 const DEFAULT_TIMEOUT_MS = 180_000;
 /** How long to wait for the pipes to close after claude exits, in case a grandchild holds them. */
@@ -114,7 +134,11 @@ interface ResultJson {
   subtype?: unknown;
   api_error_status?: unknown;
   terminal_reason?: unknown;
+  total_cost_usd?: unknown;
 }
+
+const costOf = (res: ResultJson): number | null =>
+  typeof res.total_cost_usd === "number" && Number.isFinite(res.total_cost_usd) ? res.total_cost_usd : null;
 
 /** API statuses that say nothing about the request: auth (401, 403) and rate or usage limits (429). 5xx and no status join them. */
 const ENV_STATUSES = new Set([401, 403, 429]);
@@ -150,14 +174,14 @@ function resultText(res: ResultJson, out: string): string {
     const code = status === undefined || status === null ? null : Number(status);
     if (code !== null && !(ENV_STATUSES.has(code) || code >= 500)) {
       const label = Number.isFinite(code) ? code : String(status);
-      throw new ClaudeResultError(`api_error_${label}`, `claude returned an error (API error ${label}): ${(text || out).slice(0, 500)}`);
+      throw new ClaudeResultError(`api_error_${label}`, `claude returned an error (API error ${label}): ${(text || out).slice(0, 500)}`, costOf(res));
     }
     const auth = code === 401 || code === 403 || AUTH_ERROR.test(text);
     const what = code !== null ? `API error ${code}` : "API error";
     throw new ClaudeEnvError(`claude failed (${what})${auth ? AUTH_HINT : ""}: ${(text || out).slice(0, 500)}`);
   }
   const subtype = typeof res.subtype === "string" ? res.subtype : "unknown";
-  throw new ClaudeResultError(subtype, `claude returned an error (${subtype}): ${out.slice(0, 500)}`);
+  throw new ClaudeResultError(subtype, `claude returned an error (${subtype}): ${out.slice(0, 500)}`, costOf(res));
 }
 
 /**
@@ -241,8 +265,8 @@ export function createRunClaude(opts: { timeoutMs?: number; closeGraceMs?: numbe
           return fail(new ClaudeEnvError(`${parses ? "claude returned no result" : "unparseable claude output"}: ${out.slice(0, 500)}`));
         }
         try {
-          const result = resultText(res, out);
-          settle(() => resolve(result));
+          const reply: ClaudeReply = { text: resultText(res, out), costUsd: costOf(res) };
+          settle(() => resolve(reply));
         } catch (e) {
           fail(e as Error);
         }
@@ -349,6 +373,8 @@ export interface DraftInput {
 export interface DraftResult {
   cards: Card[];
   rejected: { reason: string }[];
+  /** What the drafting call cost, when claude reported it. */
+  costUsd: number | null;
 }
 
 /** The model's stdin: the untrusted title, as one labelled line, then the diff. */
@@ -358,7 +384,14 @@ function stdinFor(title: string, diff: string): string {
 
 export async function draftCards(input: DraftInput, run: RunClaude = runClaude): Promise<DraftResult> {
   if (!/^[0-9a-f]{40,64}$/.test(input.merge)) throw new Error(`merge must be a full commit SHA: ${input.merge}`);
-  const raws = parseRawCards(await run(buildPrompt(), stdinFor(input.title, input.diff)));
+  const reply = await run(buildPrompt(), stdinFor(input.title, input.diff));
+  let raws: RawCard[];
+  try {
+    raws = parseRawCards(reply.text);
+  } catch (e) {
+    if (e instanceof ModelOutputError) e.costUsd = reply.costUsd;
+    throw e;
+  }
   const files = new Set(input.files);
   const cards: Card[] = [];
   const rejected: { reason: string }[] = [];
@@ -396,5 +429,5 @@ export async function draftCards(input: DraftInput, run: RunClaude = runClaude):
       status: "draft", anchor, body,
     });
   }
-  return { cards: rebalanceAnswers(cards, parseInt(input.merge.slice(0, 6), 16) % 4), rejected };
+  return { cards: rebalanceAnswers(cards, parseInt(input.merge.slice(0, 6), 16) % 4), rejected, costUsd: reply.costUsd };
 }
