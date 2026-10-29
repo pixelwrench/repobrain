@@ -25002,7 +25002,7 @@ function firstText(result) {
   return first?.type === "text" && typeof first.text === "string" ? first.text : null;
 }
 async function connectRemote(site, deps = {}) {
-  const transport = deps.transport ?? new StreamableHTTPClientTransport(mcpUrl(site), { authProvider: deps.authProvider ?? new FileOAuthProvider(site) });
+  const transport = deps.transport ?? new StreamableHTTPClientTransport(mcpUrl(site), { authProvider: lockedAuthProvider(deps.authProvider ?? new FileOAuthProvider(site)) });
   const client = new Client(CLIENT_INFO);
   try {
     await client.connect(transport);
@@ -25411,14 +25411,24 @@ function readAuthFile() {
   const sites = data?.sites;
   return { sites: sites && typeof sites === "object" && !Array.isArray(sites) ? sites : {} };
 }
+var privateHomes = /* @__PURE__ */ new Set();
 function writeAuthFile(data) {
-  fs3.mkdirSync(home(), { recursive: true, mode: 448 });
+  const dir = home();
+  fs3.mkdirSync(dir, { recursive: true, mode: 448 });
+  if (!privateHomes.has(dir)) {
+    if ((fs3.statSync(dir).mode & 63) !== 0) fs3.chmodSync(dir, 448);
+    privateHomes.add(dir);
+  }
   writeFileAtomic(authPath(), JSON.stringify(data, null, 2) + "\n", 384);
 }
 var LOCK_WAIT_MS = 1e4;
+var REFRESH_LOCK_WAIT_MS = 6e4;
 var LOCK_STALE_MS = 3e4;
 var pause = new Int32Array(new SharedArrayBuffer(4));
+var heldForRefresh = false;
+var refreshQueue = Promise.resolve();
 function withAuthLock(fn) {
+  if (heldForRefresh) return fn();
   fs3.mkdirSync(home(), { recursive: true, mode: 448 });
   const deadline = Date.now() + LOCK_WAIT_MS;
   let lock = acquireFileLock(`${authPath()}.lock`, LOCK_STALE_MS);
@@ -25432,6 +25442,34 @@ function withAuthLock(fn) {
   } finally {
     lock.release();
   }
+}
+function withAuthLockAsync(fn) {
+  const run2 = async () => {
+    fs3.mkdirSync(home(), { recursive: true, mode: 448 });
+    const file = `${authPath()}.lock`;
+    const deadline = Date.now() + REFRESH_LOCK_WAIT_MS;
+    let lock = acquireFileLock(file, LOCK_STALE_MS);
+    while (!lock) {
+      if (Date.now() > deadline) throw new Error(`${authPath()} is locked by another repobrain process; try again`);
+      await new Promise((resolve) => setTimeout(resolve, 20 + Math.random() * 30));
+      lock = acquireFileLock(file, LOCK_STALE_MS);
+    }
+    const held = lock;
+    const keepFresh = setInterval(() => held.refresh(), LOCK_STALE_MS / 3);
+    keepFresh.unref();
+    heldForRefresh = true;
+    try {
+      return await fn();
+    } finally {
+      heldForRefresh = false;
+      clearInterval(keepFresh);
+      held.release();
+    }
+  };
+  const result = refreshQueue.then(run2, run2);
+  refreshQueue = result.catch(() => {
+  });
+  return result;
 }
 function updateSite(site, change) {
   withAuthLock(() => {
@@ -25527,6 +25565,24 @@ var FileOAuthProvider = class {
     if (scope === "all" || scope === "discovery") this.discovery = void 0;
   }
 };
+function lockedAuthProvider(provider) {
+  let sent;
+  return {
+    async token() {
+      sent = (await provider.tokens())?.access_token;
+      return sent;
+    },
+    async onUnauthorized(ctx) {
+      await withAuthLockAsync(async () => {
+        const stored = (await provider.tokens())?.access_token;
+        if (stored !== void 0 && stored !== sent) return;
+        const { resourceMetadataUrl, scope } = extractWWWAuthenticateParams(ctx.response);
+        const result = await auth(provider, { serverUrl: ctx.serverUrl, resourceMetadataUrl, scope, fetchFn: ctx.fetchFn });
+        if (result !== "AUTHORIZED") throw new UnauthorizedError();
+      });
+    }
+  };
+}
 var PAGE = (heading, text) => `<!doctype html><meta charset="utf-8"><title>RepoBrain</title><h1>${heading}</h1><p>${text}</p>`;
 async function listenForCallback(expectedState) {
   let deliver = () => {

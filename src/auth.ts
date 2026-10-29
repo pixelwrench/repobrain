@@ -5,8 +5,8 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import path from "node:path";
 import {
-  auth, UnauthorizedError,
-  type AuthResult, type OAuthClientMetadata, type OAuthClientProvider, type OAuthDiscoveryState,
+  auth, extractWWWAuthenticateParams, UnauthorizedError,
+  type AuthProvider, type AuthResult, type OAuthClientMetadata, type OAuthClientProvider, type OAuthDiscoveryState,
   type StoredOAuthClientInformation, type StoredOAuthTokens,
 } from "@modelcontextprotocol/client";
 import { connectRemote, mcpUrl, toRemoteError, type Remote } from "./remote.js";
@@ -52,21 +52,40 @@ function readAuthFile(): AuthFile {
   return { sites: sites && typeof sites === "object" && !Array.isArray(sites) ? sites : {} };
 }
 
-/** Holds refresh tokens, so it is readable by the user only, in a home folder created private. */
+/** Home folders already checked to be private, so each is checked once per process. */
+const privateHomes = new Set<string>();
+
+/**
+ * Holds refresh tokens, so it is readable by the user only, in a home folder created private. A home folder
+ * made before sign-in existed (0755, say) is made private the first time tokens are written to it.
+ */
 function writeAuthFile(data: AuthFile): void {
-  fs.mkdirSync(home(), { recursive: true, mode: 0o700 });
+  const dir = home();
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  if (!privateHomes.has(dir)) {
+    if ((fs.statSync(dir).mode & 0o077) !== 0) fs.chmodSync(dir, 0o700);
+    privateHomes.add(dir);
+  }
   writeFileAtomic(authPath(), JSON.stringify(data, null, 2) + "\n", 0o600);
 }
 
 const LOCK_WAIT_MS = 10_000;
+/** A token refresh holds the lock across a round trip to the site, so waiting for one allows longer. */
+const REFRESH_LOCK_WAIT_MS = 60_000;
 const LOCK_STALE_MS = 30_000;
 const pause = new Int32Array(new SharedArrayBuffer(4));
+/** Set while this process holds the lock for a refresh, whose own auth.json writes then run inside it. */
+let heldForRefresh = false;
+/** Refreshes in this process, one after another. */
+let refreshQueue: Promise<unknown> = Promise.resolve();
 
 /**
  * Runs a read-modify-write of auth.json under an exclusive lock, so background captures refreshing tokens at
- * the same time can't drop each other's rotated tokens.
+ * the same time can't drop each other's rotated tokens. Inside a refresh this process already holds it, and a
+ * synchronous update can't interleave with another in the same process.
  */
 function withAuthLock<T>(fn: () => T): T {
+  if (heldForRefresh) return fn();
   fs.mkdirSync(home(), { recursive: true, mode: 0o700 });
   const deadline = Date.now() + LOCK_WAIT_MS;
   let lock = acquireFileLock(`${authPath()}.lock`, LOCK_STALE_MS);
@@ -80,6 +99,38 @@ function withAuthLock<T>(fn: () => T): T {
   } finally {
     lock.release();
   }
+}
+
+/**
+ * Runs `fn` holding the auth.json lock throughout, waiting without blocking: a token refresh, from reading the
+ * stored refresh token to saving the rotated one, so no two processes ever redeem the same refresh token.
+ */
+function withAuthLockAsync<T>(fn: () => Promise<T>): Promise<T> {
+  const run = async (): Promise<T> => {
+    fs.mkdirSync(home(), { recursive: true, mode: 0o700 });
+    const file = `${authPath()}.lock`;
+    const deadline = Date.now() + REFRESH_LOCK_WAIT_MS;
+    let lock = acquireFileLock(file, LOCK_STALE_MS);
+    while (!lock) {
+      if (Date.now() > deadline) throw new Error(`${authPath()} is locked by another repobrain process; try again`);
+      await new Promise((resolve) => setTimeout(resolve, 20 + Math.random() * 30));
+      lock = acquireFileLock(file, LOCK_STALE_MS);
+    }
+    const held = lock;
+    const keepFresh = setInterval(() => held.refresh(), LOCK_STALE_MS / 3);
+    keepFresh.unref();
+    heldForRefresh = true;
+    try {
+      return await fn();
+    } finally {
+      heldForRefresh = false;
+      clearInterval(keepFresh);
+      held.release();
+    }
+  };
+  const result = refreshQueue.then(run, run);
+  refreshQueue = result.catch(() => {});
+  return result;
 }
 
 function updateSite(site: string, change: (entry: SiteAuth) => SiteAuth | undefined): void {
@@ -200,6 +251,32 @@ export class FileOAuthProvider implements OAuthClientProvider {
     if (scope === "all" || scope === "verifier") this.verifier = undefined;
     if (scope === "all" || scope === "discovery") this.discovery = undefined;
   }
+}
+
+/**
+ * What the MCP transport signs requests with: the provider's stored access token, and on a 401 the SDK's
+ * refresh, run under the auth.json lock. Inside the lock the stored tokens are read again first: when another
+ * process has refreshed meanwhile, its new access token is used as it is. Without this, two background
+ * captures would redeem the same refresh token, and with rotation the loser's `invalid_grant` would make the
+ * SDK delete the winner's new tokens, signing the user out.
+ */
+export function lockedAuthProvider(provider: OAuthClientProvider): AuthProvider {
+  let sent: string | undefined;
+  return {
+    async token() {
+      sent = (await provider.tokens())?.access_token;
+      return sent;
+    },
+    async onUnauthorized(ctx) {
+      await withAuthLockAsync(async () => {
+        const stored = (await provider.tokens())?.access_token;
+        if (stored !== undefined && stored !== sent) return; // refreshed by another process: retry with it
+        const { resourceMetadataUrl, scope } = extractWWWAuthenticateParams(ctx.response);
+        const result = await auth(provider, { serverUrl: ctx.serverUrl, resourceMetadataUrl, scope, fetchFn: ctx.fetchFn });
+        if (result !== "AUTHORIZED") throw new UnauthorizedError();
+      });
+    },
+  };
 }
 
 // ---- The loopback callback. ----

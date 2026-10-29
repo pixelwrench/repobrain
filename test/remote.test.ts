@@ -1,5 +1,7 @@
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
+import path from "node:path";
 import type { AddressInfo } from "node:net";
 import { InMemoryTransport, SdkErrorCode, SdkHttpError, UnauthorizedError } from "@modelcontextprotocol/client";
 import { McpServer } from "@modelcontextprotocol/server";
@@ -9,7 +11,8 @@ import { authPath, FileOAuthProvider } from "../src/auth.js";
 import { CLIENT_INFO, connectRemote, RemoteError, toRemoteError, type Remote } from "../src/remote.js";
 import { startFakeSite, type FakeSite } from "./fake-site.js";
 import { VERSION } from "../src/version.js";
-import { useTempHome } from "./helpers.js";
+import { buildSync } from "esbuild";
+import { tempDir, useTempHome } from "./helpers.js";
 
 function testServer(): McpServer {
   const server = new McpServer({ name: "test-site", version: "1.0.0" });
@@ -156,6 +159,56 @@ describe("connectRemote with stored tokens", () => {
     const stored = JSON.parse(fs.readFileSync(authPath(), "utf8")).sites[site.base].tokens;
     expect(stored).toMatchObject({ access_token: FRESH, refresh_token: ROTATED });
   });
+
+  it("lets processes refreshing at once share one rotation, so none is signed out", async () => {
+    // The site rotates refresh tokens and refuses a used one, as a real authorization server may.
+    // Each refresh is slow, so without a lock every process would send the same refresh token.
+    let live = REFRESH;
+    let issued = 0;
+    const accept: string[] = [];
+    site = await startFakeSite({
+      accept,
+      token: async (form) => {
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        if (form.get("grant_type") !== "refresh_token" || form.get("refresh_token") !== live) return { status: 400, body: { error: "invalid_grant" } };
+        issued++;
+        live = "rt-" + `rotated-${issued}`;
+        const access = "at-" + `fresh-${issued}`;
+        accept.push(access);
+        return { status: 200, body: { access_token: access, token_type: "bearer", refresh_token: live } };
+      },
+    });
+    await signedIn(site.base);
+    // Bundle the client so plain node child processes can run it.
+    const out = tempDir("repobrain-remote-bundle-");
+    buildSync({
+      entryPoints: [path.resolve(import.meta.dirname, "../src/remote.ts")],
+      bundle: true, platform: "node", format: "esm", target: "node24", outfile: path.join(out, "remote.mjs"), logLevel: "warning",
+    });
+    const caller = path.join(out, "caller.mjs");
+    fs.writeFileSync(caller, [
+      'import { connectRemote } from "./remote.mjs";',
+      "try {",
+      "  const remote = await connectRemote(process.argv[2]);",
+      '  await remote.call("list_my_decks", {});',
+      "  await remote.close();",
+      "} catch (e) {",
+      '  process.stderr.write(`${e.kind}: ${e.message}\\n`);',
+      "  process.exit(1);",
+      "}",
+      "",
+    ].join("\n"));
+    const run = () =>
+      new Promise<number | null>((resolve) => {
+        spawn(process.execPath, [caller, site.base], { stdio: ["ignore", "inherit", "inherit"] }).on("exit", resolve);
+      });
+    expect(await Promise.all([run(), run(), run()])).toEqual([0, 0, 0]);
+    expect(issued).toBe(1);
+    const stored = JSON.parse(fs.readFileSync(authPath(), "utf8")).sites[site.base].tokens;
+    expect(stored.refresh_token).toBe(live);
+    expect(accept).toContain(stored.access_token);
+    expect(fs.readdirSync(process.env.REPOBRAIN_HOME!).filter((f) => f !== "auth.json")).toEqual([]);
+  }, 60_000);
 
   it("reports a refused refresh token as an auth error that names repobrain login", async () => {
     site = await startFakeSite({ accept: [FRESH], token: () => ({ status: 400, body: { error: "invalid_grant" } }) });

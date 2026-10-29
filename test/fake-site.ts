@@ -12,7 +12,7 @@ export interface FakeSiteOptions {
   /** The bearer tokens /api/mcp accepts; any other gets a 401 pointing at the metadata. */
   accept: string[];
   /** The /token endpoint: the response body and status for a form. */
-  token: (form: URLSearchParams) => { status: number; body: unknown };
+  token: (form: URLSearchParams) => { status: number; body: unknown } | Promise<{ status: number; body: unknown }>;
 }
 
 /**
@@ -46,7 +46,7 @@ export async function startFakeSite(options: FakeSiteOptions): Promise<FakeSite>
       });
     }
     if (url.pathname === "/token" && req.method === "POST") {
-      const { status, body: out } = options.token(new URLSearchParams(body));
+      const { status, body: out } = await options.token(new URLSearchParams(body));
       return json(status, out);
     }
     if (url.pathname === "/api/mcp") {

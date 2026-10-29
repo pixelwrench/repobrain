@@ -2,7 +2,7 @@ import {
   Client, OAuthClientFlowError, OAuthError, ProtocolError, SdkHttpError, StreamableHTTPClientTransport, UnauthorizedError,
   type OAuthClientProvider, type Transport,
 } from "@modelcontextprotocol/client";
-import { FileOAuthProvider } from "./auth.js";
+import { FileOAuthProvider, lockedAuthProvider } from "./auth.js";
 import { VERSION } from "./version.js";
 
 /** The site's tools, called over MCP with the user's stored OAuth tokens. */
@@ -75,9 +75,12 @@ function firstText(result: { content?: unknown }): string | null {
 /**
  * Connects to the site's MCP endpoint (`<site>/api/mcp`). Tests pass an in-memory `transport`; otherwise it
  * speaks Streamable HTTP, signing requests with `authProvider`, by default the tokens `repobrain login` stored.
+ * Token refreshes run under the auth.json lock (see `lockedAuthProvider`).
  */
 export async function connectRemote(site: string, deps: { transport?: Transport; authProvider?: OAuthClientProvider } = {}): Promise<Remote> {
-  const transport = deps.transport ?? new StreamableHTTPClientTransport(mcpUrl(site), { authProvider: deps.authProvider ?? new FileOAuthProvider(site) });
+  const transport =
+    deps.transport ??
+    new StreamableHTTPClientTransport(mcpUrl(site), { authProvider: lockedAuthProvider(deps.authProvider ?? new FileOAuthProvider(site)) });
   const client = new Client(CLIENT_INFO);
   try {
     await client.connect(transport);

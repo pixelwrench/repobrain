@@ -405,6 +405,12 @@ describe("auth.json updates", () => {
     expect(fs.statSync(authPath()).mode & 0o777).toBe(0o600);
   });
 
+  it("makes an existing home folder that others can read private", async () => {
+    fs.chmodSync(process.env.REPOBRAIN_HOME!, 0o755);
+    await new FileOAuthProvider(SITE_A).saveTokens(tokens());
+    expect(fs.statSync(process.env.REPOBRAIN_HOME!).mode & 0o777).toBe(0o700);
+  });
+
   it("creates a missing home folder readable by the user only", async () => {
     const fresh = path.join(process.env.REPOBRAIN_HOME!, "nested-home");
     process.env.REPOBRAIN_HOME = fresh;
