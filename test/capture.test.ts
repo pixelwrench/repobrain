@@ -407,6 +407,21 @@ describe("runCapture", () => {
     expect(called).toBe(false);
   });
 
+  it("doesn't take a baseline card at a merge for that merge's own cards in an old state file", async () => {
+    await runCapture(key, opts(fake()));
+    const init = readState(key).lastSha;
+    const head = commit(repo, { "src/ref.ts": FILE }, "feat: referral codes");
+    writeCard(key, {
+      id: `b${head.slice(0, 8)}-a01-x-1`, repo: "demo", merge: head, mergeTitle: "Baseline: X", area: "src", createdAt: "2026-11-02T09:00:00.000Z",
+      status: "draft", source: "baseline",
+      anchor: { commit: head, path: "src/ref.ts", symbol: null, startLine: 1, endLine: 5, lines: 5, fingerprint: "f", status: "fresh" },
+      body: { kind: "flashcard", front: "f", back: "b" },
+    });
+    fs.writeFileSync(path.join(repoDir(key), "state.json"), JSON.stringify({ lastSha: init, updatedAt: null }));
+    const report = await runCapture(key, opts(fake()));
+    expect(report).toMatchObject({ processed: 1, cardsWritten: 1 });
+  });
+
   it("caps the processed list at the last 500 merges", async () => {
     await runCapture(key, opts(fake()));
     const old = Array.from({ length: 500 }, (_, i) => i.toString(16).padStart(40, "0"));

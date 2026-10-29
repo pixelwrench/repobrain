@@ -180,8 +180,9 @@ async function captureMerges(
       return { ...report, status: "initialized" };
     }
   }
-  // Old state files have no processed list: fall back to merges that have card files.
-  const done = new Set(state.processed ?? listCards(key).map((c) => c.merge));
+  // Old state files have no processed list: fall back to merges that have card files. Only merge
+  // cards count: a baseline card's `merge` is the baseline commit, which may be a merge not drafted yet.
+  const done = new Set(state.processed ?? listCards(key).filter((c) => c.source === "merge").map((c) => c.merge));
   state.processed ??= [];
   const excludes = repoExcludes(repo.path, (line, why) => appendLog(key, `ignore line dropped: ${JSON.stringify(line)} (${why})`));
   let commits;
