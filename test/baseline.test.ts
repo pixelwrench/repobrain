@@ -3,7 +3,6 @@ import path from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   BaselineError, baselineStatus, buildBaselinePrompt, buildPlanPrompt, draftBaselineArea, MAX_AREA_CARDS, planBaseline, readPlan, setAreaSkipped,
-  type BaselinePlan,
 } from "../src/baseline.js";
 import { ClaudeEnvError, ClaudeLimitError, ClaudeResultError, MAX_CARDS, type RunClaude } from "../src/generate.js";
 import { acquireLock, cardPath, connectRepo, listCards, readCard, repoDir, writeCard } from "../src/store.js";
@@ -60,12 +59,12 @@ describe("baseline", () => {
       const saved = readPlan(key)!;
       expect(saved).toEqual(out.plan);
       expect(saved).toEqual({
-        commit: head, plannedAt: "2026-11-02T09:00:00.000Z", planCostUsd: 0.0042,
+        commit: head, plannedAt: "2026-11-02T09:00:00.000Z", nonce: expect.stringMatching(/^[0-9a-f]{4}$/), planCostUsd: 0.0042,
         areas: [
           { id: "a01-request-handling", name: "Request handling", why: "Where requests come in", files: ["src/server.ts"], status: "planned", cards: 0, costUsd: null },
           { id: "a02-referrals", name: "Referrals", why: "How codes become discounts", files: ["src/ref.ts", "src/server.ts"], status: "planned", cards: 0, costUsd: null },
         ],
-      } satisfies BaselinePlan);
+      });
       expect(log()).toContain("baseline plan at " + head + ": 2 areas, cost $0.0042");
     });
 
@@ -204,7 +203,7 @@ describe("baseline", () => {
       expect(out.error).toBeUndefined();
       const [c] = listCards(key);
       expect(c).toMatchObject({
-        id: `b${head.slice(0, 8)}-a01-request-handling-1`, merge: head, mergeTitle: "Baseline: Request handling", source: "baseline", area: "src", status: "draft",
+        id: `b${head.slice(0, 8)}-${readPlan(key)!.nonce}-a01-request-handling-1`, merge: head, mergeTitle: "Baseline: Request handling", source: "baseline", area: "src", status: "draft",
         anchor: { commit: head, path: "src/server.ts", startLine: 2, endLine: 4, status: "fresh" },
       });
       expect(readPlan(key)!.areas[0]).toMatchObject({ status: "drafted", cards: 1, costUsd: 0.0123 });
@@ -307,17 +306,32 @@ describe("baseline", () => {
     });
   });
 
-  it("keeps a curated card when its area is drafted again after a re-plan", async () => {
+  it("gives a re-plan at the same head new card ids, leaving the old plan's cards alone", async () => {
     await planned();
     await draftBaselineArea(key, { next: true, run: async () => reply([card("src/server.ts")]), now });
-    const [c] = listCards(key);
-    writeCard(key, { ...c, status: "kept" });
+    const [kept] = listCards(key);
+    writeCard(key, { ...kept, status: "kept" });
+    await draftBaselineArea(key, { next: true, run: async () => reply([card("src/ref.ts")]), now });
+    const draft = listCards(key).find((c) => c.id !== kept.id)!;
+    const first = readPlan(key)!.nonce;
     await planBaseline(key, { fetch: false, force: true, run: async () => reply(twoAreas), now });
-    const out = await draftBaselineArea(key, { next: true, run: async () => reply([card("src/server.ts", { front: "Changed?" })]), now });
-    expect(out.cardsWritten).toBe(0);
-    expect(readCard(key, c.id)).toMatchObject({ status: "kept", body: { front: "What lives in src/server.ts?" } });
-    expect(fs.existsSync(cardPath(key, c.id))).toBe(true);
-    expect(log()).toContain(`not overwriting ${c.id}`);
+    expect(readPlan(key)!.nonce).not.toBe(first);
+    for (const [i, file] of ["src/server.ts", "src/ref.ts"].entries()) {
+      const out = await draftBaselineArea(key, { next: true, run: async () => reply([card(file, { front: `Changed ${i}?` })]), now });
+      expect(out.cardsWritten).toBe(1);
+    }
+    expect(listCards(key)).toHaveLength(4);
+    expect(readCard(key, kept.id)).toMatchObject({ status: "kept", body: { front: "What lives in src/server.ts?" } });
+    expect(readCard(key, draft.id)).toMatchObject({ status: "draft", body: { front: "What lives in src/ref.ts?" } });
+  });
+
+  it("fails an area whose draft writes no cards, so it can be drafted again or skipped", async () => {
+    await planned();
+    const out = await draftBaselineArea(key, { next: true, run: async () => reply([card("src/ref.ts")], 0.01), now });
+    expect(out).toMatchObject({ area: { status: "failed" }, cardsWritten: 0, error: expect.stringMatching(/^no usable cards: path not sent: src\/ref\.ts/), costUsd: 0.01 });
+    expect(readPlan(key)!.areas[0]).toMatchObject({ status: "failed", cards: 0, error: expect.stringMatching(/no usable cards/) });
+    const again = await draftBaselineArea(key, { areaId: "a01-request-handling", run: async () => reply([card("src/server.ts")]), now });
+    expect(again).toMatchObject({ area: { status: "drafted" }, cardsWritten: 1 });
   });
 
   it("reports status with totals and the total known cost", async () => {

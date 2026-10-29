@@ -3,6 +3,7 @@
  * file list (and a clean README excerpt) and gets back areas in learning order; `draft` sends one
  * area's files at a time, so the user paces the spend. The plan lives in `baseline.json`.
  */
+import { randomBytes } from "node:crypto";
 import path from "node:path";
 import { repoExcludes } from "./excludes.js";
 import { oneLine } from "./format.js";
@@ -37,6 +38,8 @@ export interface BaselinePlan {
   /** The default branch's head when planned: files are read and cards anchored here. */
   commit: string;
   plannedAt: string;
+  /** Four random hex digits in this plan's card ids, so a re-plan at the same commit never reuses an earlier plan's ids. */
+  nonce: string;
   /** What the planning call cost, when claude reported it. */
   planCostUsd: number | null;
   /** In the order a newcomer should learn them. */
@@ -88,6 +91,7 @@ const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "obj
 
 function isPlan(v: unknown): v is BaselinePlan {
   if (!isObject(v) || typeof v.commit !== "string" || typeof v.plannedAt !== "string" || !Array.isArray(v.areas)) return false;
+  if (typeof v.nonce !== "string" || !/^[0-9a-f]{4}$/.test(v.nonce)) return false;
   return v.areas.every(
     (a) =>
       isObject(a) && typeof a.id === "string" && isSafeId(a.id) && typeof a.name === "string" && Array.isArray(a.files) &&
@@ -241,7 +245,7 @@ export async function planBaseline(key: string, opts: PlanOptions = {}): Promise
       appendLog(key, `baseline plan failed, ${costLabel(costUsd)}: ${message(e)}`);
       return { existing: false, plan: null, sent, rejected: [], costUsd, error: message(e) };
     }
-    const plan: BaselinePlan = { commit, plannedAt: now().toISOString(), planCostUsd: costUsd, areas };
+    const plan: BaselinePlan = { commit, plannedAt: now().toISOString(), nonce: randomBytes(2).toString("hex"), planCostUsd: costUsd, areas };
     writePlan(key, plan);
     appendLog(key, `baseline plan at ${commit}: ${areas.length} areas, ${costLabel(costUsd)}${rejected.length ? `; left out: ${rejected.join(" | ")}` : ""}`);
     return { existing: false, plan, sent, rejected, costUsd };
@@ -346,7 +350,7 @@ export async function draftBaselineArea(key: string, opts: DraftAreaOptions): Pr
       return finish("failed", null, "no files could be sent: each was dropped or too large");
     }
 
-    const prefix = `b${plan.commit.slice(0, 8)}-${area.id}-`;
+    const prefix = `b${plan.commit.slice(0, 8)}-${plan.nonce}-${area.id}-`;
     if (!isSafeId(`${prefix}1`)) throw new BaselineError(`area id ${area.id} can't make a safe card id`);
     let drafted;
     try {
@@ -387,6 +391,11 @@ export async function draftBaselineArea(key: string, opts: DraftAreaOptions): Pr
       `baseline ${area.id}: ${report.cardsWritten} cards, ${report.rejected.length} rejected, ${costLabel(drafted.costUsd)}${files ? `, ${files} files not sent` : ""}` +
         (report.rejected.length ? `: ${report.rejected.join(" | ")}` : ""),
     );
+    // An area with nothing written would otherwise count as done; failed lets it be drafted again or skipped.
+    if (report.cardsWritten === 0) {
+      const why = report.rejected.length ? report.rejected.join(" | ") : drafted.cards.length ? "every card's file exists and isn't a draft" : "the reply had no cards";
+      return finish("failed", drafted.costUsd, `no usable cards: ${why}`);
+    }
     return finish("drafted", drafted.costUsd);
   } finally {
     lock.release();
