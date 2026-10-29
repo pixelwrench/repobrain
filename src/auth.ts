@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import fs from "node:fs";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import path from "node:path";
@@ -9,7 +10,7 @@ import {
   type StoredOAuthClientInformation, type StoredOAuthTokens,
 } from "@modelcontextprotocol/client";
 import { connectRemote, mcpUrl, toRemoteError, type Remote } from "./remote.js";
-import { home, readJson, writeFileAtomic } from "./store.js";
+import { acquireFileLock, home, readJson, writeFileAtomic } from "./store.js";
 
 export const DEFAULT_SITE = "https://repobrain.com";
 const LOGIN_TIMEOUT_MS = 5 * 60_000;
@@ -51,17 +52,44 @@ function readAuthFile(): AuthFile {
   return { sites: sites && typeof sites === "object" && !Array.isArray(sites) ? sites : {} };
 }
 
-/** Holds refresh tokens, so it is readable by the user only. */
+/** Holds refresh tokens, so it is readable by the user only, in a home folder created private. */
 function writeAuthFile(data: AuthFile): void {
+  fs.mkdirSync(home(), { recursive: true, mode: 0o700 });
   writeFileAtomic(authPath(), JSON.stringify(data, null, 2) + "\n", 0o600);
 }
 
+const LOCK_WAIT_MS = 10_000;
+const LOCK_STALE_MS = 30_000;
+const pause = new Int32Array(new SharedArrayBuffer(4));
+
+/**
+ * Runs a read-modify-write of auth.json under an exclusive lock, so background captures refreshing tokens at
+ * the same time can't drop each other's rotated tokens.
+ */
+function withAuthLock<T>(fn: () => T): T {
+  fs.mkdirSync(home(), { recursive: true, mode: 0o700 });
+  const deadline = Date.now() + LOCK_WAIT_MS;
+  let lock = acquireFileLock(`${authPath()}.lock`, LOCK_STALE_MS);
+  while (!lock) {
+    if (Date.now() > deadline) throw new Error(`${authPath()} is locked by another repobrain process; try again`);
+    Atomics.wait(pause, 0, 0, 10 + Math.random() * 20);
+    lock = acquireFileLock(`${authPath()}.lock`, LOCK_STALE_MS);
+  }
+  try {
+    return fn();
+  } finally {
+    lock.release();
+  }
+}
+
 function updateSite(site: string, change: (entry: SiteAuth) => SiteAuth | undefined): void {
-  const data = readAuthFile();
-  const next = change({ ...data.sites[site] });
-  if (next === undefined) delete data.sites[site];
-  else data.sites[site] = next;
-  writeAuthFile(data);
+  withAuthLock(() => {
+    const data = readAuthFile(); // read inside the lock, so another process's write is never lost
+    const next = change({ ...data.sites[site] });
+    if (next === undefined) delete data.sites[site];
+    else data.sites[site] = next;
+    writeAuthFile(data);
+  });
 }
 
 const notSignedIn = (site: string): UnauthorizedError =>

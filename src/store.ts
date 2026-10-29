@@ -220,7 +220,11 @@ function pidAlive(pid: number): boolean {
  * newer than staleMs. A lock whose holder pid is dead, or that is older than staleMs, is reclaimed.
  */
 export function acquireLock(key: string, staleMs = 15 * 60_000): Lock | null {
-  const file = path.join(repoDir(key), "capture.lock");
+  return acquireFileLock(path.join(repoDir(key), "capture.lock"), staleMs);
+}
+
+/** Takes the lock at `file`, with the same rules as {@link acquireLock}. */
+export function acquireFileLock(file: string, staleMs: number): Lock | null {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const token = `${process.pid}:${randomUUID()}`;
   const ours = (): boolean => readOrNull(file) === token;

@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
@@ -7,7 +8,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { authPath, FileOAuthProvider, login, logout, resolveSite, DEFAULT_SITE, type AuthFlow, type LoginDeps } from "../src/auth.js";
 import { main } from "../src/cli.js";
 import type { Remote } from "../src/remote.js";
-import { useTempHome } from "./helpers.js";
+import { buildSync } from "esbuild";
+import { tempDir, useTempHome } from "./helpers.js";
 
 // Token-looking values are built by concatenation so secret scanners don't flag the repo.
 const ACCESS = "at-" + "fake-access-value";
@@ -320,4 +322,46 @@ describe("login failures", () => {
       message: expect.stringMatching(/could not reach the site/),
     });
   });
+});
+
+describe("auth.json updates", () => {
+  it("rewrites a pre-existing 0644 auth.json as 0600 and keeps the home folder private", async () => {
+    fs.writeFileSync(authPath(), '{"sites":{}}\n', { mode: 0o644 });
+    fs.chmodSync(authPath(), 0o644);
+    await new FileOAuthProvider(SITE_A).saveTokens(tokens());
+    expect(fs.statSync(authPath()).mode & 0o777).toBe(0o600);
+  });
+
+  it("creates a missing home folder readable by the user only", async () => {
+    const fresh = path.join(process.env.REPOBRAIN_HOME!, "nested-home");
+    process.env.REPOBRAIN_HOME = fresh;
+    await new FileOAuthProvider(SITE_A).saveTokens(tokens());
+    expect(fs.statSync(fresh).mode & 0o777).toBe(0o700);
+  });
+
+  it("keeps both sites when two processes update auth.json at once", async () => {
+    // Bundle the provider so plain node child processes can run it.
+    const out = tempDir("repobrain-auth-bundle-");
+    buildSync({
+      entryPoints: [path.resolve(import.meta.dirname, "../src/auth.ts")],
+      bundle: true, platform: "node", format: "esm", target: "node24", outfile: path.join(out, "auth.mjs"), logLevel: "warning",
+    });
+    const writer = path.join(out, "writer.mjs");
+    fs.writeFileSync(writer, [
+      'import { FileOAuthProvider } from "./auth.mjs";',
+      "const [site, n] = [process.argv[2], Number(process.argv[3])];",
+      "const p = new FileOAuthProvider(site);",
+      'for (let i = 0; i < n; i++) p.saveTokens({ access_token: "t" + i, token_type: "bearer" });',
+      "",
+    ].join("\n"));
+    const run = (site: string) =>
+      new Promise<number | null>((resolve) => {
+        spawn(process.execPath, [writer, site, "60"], { stdio: "inherit" }).on("exit", resolve);
+      });
+    expect(await Promise.all([run(SITE_A), run(SITE_B)])).toEqual([0, 0]);
+    const sites = readAuth().sites;
+    expect(sites[SITE_A]?.tokens.access_token).toBe("t59");
+    expect(sites[SITE_B]?.tokens.access_token).toBe("t59");
+    expect(fs.readdirSync(process.env.REPOBRAIN_HOME!).filter((f) => f !== "auth.json")).toEqual([]);
+  }, 60_000);
 });

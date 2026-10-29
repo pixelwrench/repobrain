@@ -618,7 +618,7 @@ var init_fsrs_6_Bt0f3F6X = __esm({
 });
 
 // src/cli.ts
-import fs5 from "node:fs";
+import fs6 from "node:fs";
 import path9 from "node:path";
 import { parseArgs } from "node:util";
 
@@ -848,6 +848,7 @@ function locateAnchor(content, anchor2) {
 // src/auth.ts
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import fs3 from "node:fs";
 import http from "node:http";
 import path3 from "node:path";
 
@@ -20748,11 +20749,11 @@ var require_dist = /* @__PURE__ */ __commonJSMin(((exports, module) => {
     if (!f) throw new Error(`Unknown format "${name}"`);
     return f;
   };
-  function addFormats2(ajv, list, fs6, exportName) {
+  function addFormats2(ajv, list, fs7, exportName) {
     var _a3;
     var _b;
     (_a3 = (_b = ajv.opts.code).formats) !== null && _a3 !== void 0 || (_b.formats = (0, codegen_1._)`require("ajv-formats/dist/formats").${exportName}`);
-    for (const f of list) ajv.addFormat(f, fs6[f]);
+    for (const f of list) ajv.addFormat(f, fs7[f]);
   }
   module.exports = exports = formatsPlugin;
   Object.defineProperty(exports, "__esModule", { value: true });
@@ -25306,7 +25307,9 @@ function pidAlive(pid) {
   }
 }
 function acquireLock(key, staleMs = 15 * 6e4) {
-  const file = path2.join(repoDir(key), "capture.lock");
+  return acquireFileLock(path2.join(repoDir(key), "capture.lock"), staleMs);
+}
+function acquireFileLock(file, staleMs) {
   fs2.mkdirSync(path2.dirname(file), { recursive: true });
   const token = `${process.pid}:${randomUUID()}`;
   const ours = () => readOrNull(file) === token;
@@ -25409,14 +25412,35 @@ function readAuthFile() {
   return { sites: sites && typeof sites === "object" && !Array.isArray(sites) ? sites : {} };
 }
 function writeAuthFile(data) {
+  fs3.mkdirSync(home(), { recursive: true, mode: 448 });
   writeFileAtomic(authPath(), JSON.stringify(data, null, 2) + "\n", 384);
 }
+var LOCK_WAIT_MS = 1e4;
+var LOCK_STALE_MS = 3e4;
+var pause = new Int32Array(new SharedArrayBuffer(4));
+function withAuthLock(fn) {
+  fs3.mkdirSync(home(), { recursive: true, mode: 448 });
+  const deadline = Date.now() + LOCK_WAIT_MS;
+  let lock = acquireFileLock(`${authPath()}.lock`, LOCK_STALE_MS);
+  while (!lock) {
+    if (Date.now() > deadline) throw new Error(`${authPath()} is locked by another repobrain process; try again`);
+    Atomics.wait(pause, 0, 0, 10 + Math.random() * 20);
+    lock = acquireFileLock(`${authPath()}.lock`, LOCK_STALE_MS);
+  }
+  try {
+    return fn();
+  } finally {
+    lock.release();
+  }
+}
 function updateSite(site, change) {
-  const data = readAuthFile();
-  const next = change({ ...data.sites[site] });
-  if (next === void 0) delete data.sites[site];
-  else data.sites[site] = next;
-  writeAuthFile(data);
+  withAuthLock(() => {
+    const data = readAuthFile();
+    const next = change({ ...data.sites[site] });
+    if (next === void 0) delete data.sites[site];
+    else data.sites[site] = next;
+    writeAuthFile(data);
+  });
 }
 var notSignedIn = (site) => new UnauthorizedError(`not signed in to ${site}: run repobrain login --site ${site}`);
 var FileOAuthProvider = class {
@@ -25608,7 +25632,7 @@ import { randomBytes as randomBytes2 } from "node:crypto";
 import path6 from "node:path";
 
 // src/excludes.ts
-import fs3 from "node:fs";
+import fs4 from "node:fs";
 import path4 from "node:path";
 var DEFAULT_EXCLUDES = [
   "**/package-lock.json",
@@ -25629,7 +25653,7 @@ var DEFAULT_EXCLUDES = [
 function readIgnore(repoPath, drop) {
   let text;
   try {
-    text = fs3.readFileSync(path4.join(repoPath, ".repobrain", "ignore"), "utf8");
+    text = fs4.readFileSync(path4.join(repoPath, ".repobrain", "ignore"), "utf8");
   } catch {
     return [];
   }
@@ -25672,7 +25696,7 @@ function repoExcludes(repoPath, drop) {
 
 // src/generate.ts
 import { spawn as spawn2 } from "node:child_process";
-import fs4 from "node:fs";
+import fs5 from "node:fs";
 import path5 from "node:path";
 
 // src/guard.ts
@@ -25982,7 +26006,7 @@ function createRunClaude(opts = {}) {
   const closeGraceMs = opts.closeGraceMs ?? DEFAULT_CLOSE_GRACE_MS;
   return (prompt, stdin) => new Promise((resolve, reject) => {
     const cwd = path5.join(home(), "run");
-    fs4.mkdirSync(cwd, { recursive: true });
+    fs5.mkdirSync(cwd, { recursive: true });
     const child = spawn2("claude", claudeArgs(prompt), { cwd, env: childEnv(), stdio: ["pipe", "pipe", "pipe"], detached: true });
     let out = "";
     let err = "";
@@ -28384,8 +28408,8 @@ var blockText = (content, start, end) => content === null ? null : content.split
 function logCaptureError(key, dir, msg) {
   try {
     if (key) return appendLog(key, `capture failed: ${msg}`);
-    fs5.mkdirSync(home(), { recursive: true });
-    fs5.appendFileSync(path9.join(home(), "capture-errors.log"), `${(/* @__PURE__ */ new Date()).toISOString()} ${dir}: ${msg}
+    fs6.mkdirSync(home(), { recursive: true });
+    fs6.appendFileSync(path9.join(home(), "capture-errors.log"), `${(/* @__PURE__ */ new Date()).toISOString()} ${dir}: ${msg}
 `);
   } catch {
   }
@@ -28745,7 +28769,7 @@ ${USAGE}`);
       if (!id) return usage("usage: repobrain card <id>");
       if (!isSafeId(id)) return badId(id);
       const file = cardPath(connected(values.repo).key, id);
-      if (!fs5.existsSync(file)) return noCard(id);
+      if (!fs6.existsSync(file)) return noCard(id);
       return ok({ path: file });
     }
     default:
