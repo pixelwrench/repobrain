@@ -23,7 +23,7 @@ import {
 import { commit, makeRepo, sh, tempDir, useTempHome } from "./helpers.js";
 
 const card = (id: string): Card => ({
-  id, repo: "r", merge: "m".repeat(40), mergeTitle: "t", area: "src", createdAt: "2026-11-02T09:00:00.000Z", status: "draft",
+  id, repo: "r", merge: "m".repeat(40), mergeTitle: "t", area: "src", createdAt: "2026-11-02T09:00:00.000Z", status: "draft", source: "merge",
   anchor: { commit: "c", path: "src/a.ts", symbol: null, startLine: 1, endLine: 2, lines: 2, fingerprint: "f", status: "fresh" },
   body: { kind: "flashcard", front: "front", back: "back" },
 });

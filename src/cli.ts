@@ -3,7 +3,7 @@ import path from "node:path";
 import { parseArgs } from "node:util";
 import { findSymbolLines, makeAnchor } from "./anchor.js";
 import { runCapture, type CaptureReport } from "./capture.js";
-import { areaOf, LETTERS, type Anchor, type AnchorStatus, type Card, type CardBody, type CardStatus } from "./format.js";
+import { areaOf, CARD_SOURCES, LETTERS, type Anchor, type AnchorStatus, type Card, type CardBody, type CardSource, type CardStatus } from "./format.js";
 import type { RunClaude } from "./generate.js";
 import { defaultBranch, fileAt, resolveCommit } from "./git.js";
 import { dueCards, loadSchedule, recordGrade, type Grade } from "./schedule.js";
@@ -45,9 +45,11 @@ export interface WeekCard {
   symbol: string | null;
   body: BodyOutput;
 }
+/** One change's cards: a merge, or one baseline area (which shares the baseline commit with the other areas). */
 export interface WeekGroup {
   merge: string;
   title: string;
+  source: CardSource;
   cards: WeekCard[];
 }
 export interface WeekOutput {
@@ -55,7 +57,7 @@ export interface WeekOutput {
   drafts: number;
   /** Kept cards whose code changed or was removed. */
   flagged: number;
-  /** Groups by area, then by merge. */
+  /** Groups by area, then by merge and title. */
   areas: Record<string, WeekGroup[]>;
   unreadable: UnreadableCard[];
   claudeUnavailable: ClaudeUnavailable | null;
@@ -85,6 +87,14 @@ export interface GradeOutput {
   id: string;
   nextDue: string;
 }
+/** Card and curation counts for the cards from one source. */
+export interface SourceStats {
+  cards: number;
+  draft: number;
+  kept: number;
+  dropped: number;
+  curated: { keep: number; fix: number; drop: number };
+}
 export interface StatsOutput {
   cards: number;
   draft: number;
@@ -96,6 +106,11 @@ export interface StatsOutput {
   curated: { keep: number; fix: number; drop: number };
   reviews: number;
   right: number;
+  /**
+   * The same counts split by where the cards came from. A curate decision counts only while its card
+   * file can be read, since the source is in the file.
+   */
+  bySource: Record<CardSource, SourceStats>;
   unreadable: UnreadableCard[];
   claudeUnavailable: ClaudeUnavailable | null;
   lastCaptureError: CaptureError | null;
@@ -336,8 +351,9 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
       const areas: Record<string, WeekGroup[]> = {};
       for (const c of items) {
         const groups = (areas[c.area] ??= []);
-        let group = groups.find((g) => g.merge === c.merge);
-        if (!group) groups.push((group = { merge: c.merge, title: c.mergeTitle, cards: [] }));
+        // Baseline areas share one commit, so the title tells them apart.
+        let group = groups.find((g) => g.merge === c.merge && g.title === c.mergeTitle);
+        if (!group) groups.push((group = { merge: c.merge, title: c.mergeTitle, source: c.source, cards: [] }));
         group.cards.push({
           id: c.id, status: c.status, anchor: c.anchor.status, path: c.anchor.path, startLine: c.anchor.startLine, endLine: c.anchor.endLine,
           symbol: c.anchor.symbol, body: bodyOutput(c.body),
@@ -441,11 +457,19 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
     case "stats": {
       const { key } = connected(values.repo);
       const { cards, unreadable } = listCardsReport(key);
-      const byStatus = (s: CardStatus) => cards.filter((c) => c.status === s).length;
+      const byStatus = (s: CardStatus, from = cards) => from.filter((c) => c.status === s).length;
       // A card curated twice counts once, by its latest decision.
       const latest = new Map<string, string>();
       for (const c of readJsonl<{ card: string; decision: string }>(key, "curation.jsonl")) latest.set(c.card, c.decision);
-      const decided = (d: Decision) => [...latest.values()].filter((v) => v === d).length;
+      const decided = (d: Decision, ids?: Set<string>) => [...latest].filter(([id, v]) => v === d && (!ids || ids.has(id))).length;
+      const sourceStats = (source: CardSource): SourceStats => {
+        const from = cards.filter((c) => c.source === source);
+        const ids = new Set(from.map((c) => c.id));
+        return {
+          cards: from.length, draft: byStatus("draft", from), kept: byStatus("kept", from), dropped: byStatus("dropped", from),
+          curated: { keep: decided("keep", ids), fix: decided("fix", ids), drop: decided("drop", ids) },
+        };
+      };
       const reviews = readJsonl<{ grade: string }>(key, "reviews.jsonl");
       const out: StatsOutput = {
         cards: cards.length, draft: byStatus("draft"), kept: byStatus("kept"), dropped: byStatus("dropped"),
@@ -453,6 +477,7 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
         orphaned: cards.filter((c) => c.anchor.status === "orphaned").length,
         curated: { keep: decided("keep"), fix: decided("fix"), drop: decided("drop") },
         reviews: reviews.length, right: reviews.filter((r) => r.grade === "right").length,
+        bySource: Object.fromEntries(CARD_SOURCES.map((s) => [s, sourceStats(s)])) as Record<CardSource, SourceStats>,
         unreadable,
         ...stateStatus(key),
       };

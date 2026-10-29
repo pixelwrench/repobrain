@@ -6,7 +6,10 @@
 
 export const CARD_STATUSES = ["draft", "kept", "dropped"] as const;
 export const ANCHOR_STATUSES = ["fresh", "changed", "orphaned"] as const;
+/** Where a card came from: a merge on the default branch, or a baseline of the codebase as it stood. */
+export const CARD_SOURCES = ["merge", "baseline"] as const;
 export type CardStatus = (typeof CARD_STATUSES)[number];
+export type CardSource = (typeof CARD_SOURCES)[number];
 export type AnchorStatus = (typeof ANCHOR_STATUSES)[number];
 
 export interface Anchor {
@@ -28,11 +31,14 @@ export type CardBody =
 export interface Card {
   id: string;
   repo: string;
+  /** The merge's commit; for a baseline card, the baseline commit. */
   merge: string;
+  /** The merge's title; for a baseline card, "Baseline: <area name>". */
   mergeTitle: string;
   area: string;
   createdAt: string;
   status: CardStatus;
+  source: CardSource;
   anchor: Anchor;
   body: CardBody;
 }
@@ -49,7 +55,7 @@ export function serializeCard(card: Card): string {
   const a = card.anchor;
   const meta: Record<string, unknown> = {
     id: card.id, repo: card.repo, merge: card.merge, merge_title: card.mergeTitle, area: card.area,
-    created_at: card.createdAt, status: card.status,
+    created_at: card.createdAt, status: card.status, source: card.source,
     anchor_commit: a.commit, anchor_path: a.path, anchor_symbol: a.symbol, anchor_start: a.startLine,
     anchor_end: a.endLine, anchor_lines: a.lines, anchor_fingerprint: a.fingerprint, anchor_status: a.status,
   };
@@ -128,6 +134,8 @@ export function parseCard(text: string): Card {
   return {
     id: str("id"), repo: str("repo"), merge: str("merge"), mergeTitle: str("merge_title"), area: str("area"),
     createdAt: str("created_at"), status: oneOf("status", CARD_STATUSES),
+    // Card files written before baselines have no source: they are all merge cards.
+    source: meta.source === undefined ? "merge" : oneOf("source", CARD_SOURCES),
     anchor: {
       commit: str("anchor_commit"), path: str("anchor_path"),
       symbol: typeof meta.anchor_symbol === "string" ? meta.anchor_symbol : null,

@@ -59,7 +59,12 @@ describe("cli", () => {
 
     expect((await cli("stats")).out).toEqual({
       cards: 2, draft: 0, kept: 1, dropped: 1, changed: 0, orphaned: 0,
-      curated: { keep: 1, fix: 0, drop: 1 }, reviews: 1, right: 1, unreadable: [], claudeUnavailable: null, lastCaptureError: null, stateError: null,
+      curated: { keep: 1, fix: 0, drop: 1 }, reviews: 1, right: 1,
+      bySource: {
+        merge: { cards: 2, draft: 0, kept: 1, dropped: 1, curated: { keep: 1, fix: 0, drop: 1 } },
+        baseline: { cards: 0, draft: 0, kept: 0, dropped: 0, curated: { keep: 0, fix: 0, drop: 0 } },
+      },
+      unreadable: [], claudeUnavailable: null, lastCaptureError: null, stateError: null,
     } satisfies StatsOutput);
   });
 
@@ -117,6 +122,43 @@ describe("cli", () => {
       expect(await cli("answer", "deadbeef00-9")).toEqual({ code: 1, out: { error: "no card deadbeef00-9 in this repository" } });
       expect((await cli("answer", "../x")).code).toBe(2);
       expect((await cli("answer")).code).toBe(2);
+    });
+  });
+
+  describe("baseline cards", () => {
+    /** Two baseline areas sharing one commit, plus the merge's own cards. */
+    const withBaseline = async () => {
+      const key = await connectAndCapture();
+      const [card] = listCards(key);
+      const base = (n: number, area: string): Card => ({ ...card, id: `b${card.merge.slice(0, 8)}-a0${n}-x-1`, source: "baseline", mergeTitle: `Baseline: ${area}` });
+      writeCard(key, base(1, "Entry points"));
+      writeCard(key, base(2, "Referrals"));
+      return { key, card, a: base(1, "Entry points"), b: base(2, "Referrals") };
+    };
+
+    it("groups week by commit and title, so each baseline area is its own group, and says each group's source", async () => {
+      const { a, b } = await withBaseline();
+      const groups = ((await cli("week")).out as WeekOutput).areas["src"];
+      expect(groups.map((g) => [g.title, g.source, g.cards.length])).toEqual([
+        ["feat: referral codes", "merge", 2],
+        ["Baseline: Entry points", "baseline", 1],
+        ["Baseline: Referrals", "baseline", 1],
+      ]);
+      expect(groups[1].cards[0].id).toBe(a.id);
+      expect(groups[2].cards[0].id).toBe(b.id);
+    });
+
+    it("splits stats by source, keeping the overall figures", async () => {
+      const { card, a, b } = await withBaseline();
+      await cli("curate", card.id, "keep");
+      await cli("curate", a.id, "fix");
+      await cli("curate", b.id, "drop");
+      const stats = (await cli("stats")).out as StatsOutput;
+      expect(stats).toMatchObject({ cards: 4, draft: 1, kept: 2, dropped: 1, curated: { keep: 1, fix: 1, drop: 1 } });
+      expect(stats.bySource).toEqual({
+        merge: { cards: 2, draft: 1, kept: 1, dropped: 0, curated: { keep: 1, fix: 0, drop: 0 } },
+        baseline: { cards: 2, draft: 0, kept: 1, dropped: 1, curated: { keep: 0, fix: 1, drop: 1 } },
+      });
     });
   });
 

@@ -9,7 +9,7 @@ import { commit, makeRepo, useTempHome } from "./helpers.js";
 const t0 = new Date("2026-11-02T09:00:00Z");
 
 const card = (id: string, over: Partial<Card> = {}): Card => ({
-  id, repo: "r", merge: "m", mergeTitle: "t", area: "src", createdAt: t0.toISOString(), status: "kept",
+  id, repo: "r", merge: "m", mergeTitle: "t", area: "src", createdAt: t0.toISOString(), status: "kept", source: "merge",
   anchor: { commit: "c", path: "src/a.ts", symbol: null, startLine: 1, endLine: 1, lines: 1, fingerprint: "f", status: "fresh" },
   body: { kind: "flashcard", front: "f", back: "b" },
   ...over,

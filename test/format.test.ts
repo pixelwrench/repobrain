@@ -9,6 +9,7 @@ const base: Card = {
   area: "web/src/server",
   createdAt: "2026-11-02T09:00:00.000Z",
   status: "draft",
+  source: "merge",
   anchor: {
     commit: "abc1234567def", path: "web/src/server/referrals.ts", symbol: "applyReferral",
     startLine: 10, endLine: 24, lines: 12, fingerprint: "0123456789abcdef", status: "fresh",
@@ -25,6 +26,22 @@ const base: Card = {
 describe("card format", () => {
   it("round-trips a multiple-choice card", () => {
     expect(parseCard(serializeCard(base))).toEqual(base);
+  });
+
+  it("round-trips a baseline card, and writes source always", () => {
+    const card: Card = { ...base, source: "baseline", mergeTitle: "Baseline: Entry points" };
+    expect(parseCard(serializeCard(card))).toEqual(card);
+    expect(serializeCard(base)).toContain('source: "merge"');
+  });
+
+  it("reads a card file without source, as written before baselines, as a merge card", () => {
+    const text = serializeCard(base).replace(/^source: .*\n/m, "");
+    expect(text).not.toContain("source:");
+    expect(parseCard(text)).toEqual(base);
+  });
+
+  it("rejects an unknown source", () => {
+    expect(() => parseCard(serializeCard(base).replace('source: "merge"', 'source: "import"'))).toThrow(/source must be one of merge, baseline/);
   });
 
   it("round-trips a flashcard", () => {

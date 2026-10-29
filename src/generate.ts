@@ -426,7 +426,7 @@ export async function draftCards(input: DraftInput, run: RunClaude = runClaude):
     cards.push({
       id: `${input.merge.slice(0, 10)}-${cards.length + 1}`, repo: input.repoName, merge: input.merge,
       mergeTitle: input.title, area: areaOf(raw.path, input.areaDepth), createdAt: input.now.toISOString(),
-      status: "draft", anchor, body,
+      status: "draft", source: "merge", anchor, body,
     });
   }
   return { cards: rebalanceAnswers(cards, parseInt(input.merge.slice(0, 6), 16) % 4), rejected, costUsd: reply.costUsd };
