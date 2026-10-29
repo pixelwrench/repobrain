@@ -62,12 +62,12 @@ export function readJson<T>(file: string, fallback: T): T {
   }
 }
 
-/** Writes via a temp file in the same directory, then renames over the target. */
-export function writeFileAtomic(file: string, data: string): void {
+/** Writes via a temp file in the same directory, then renames over the target. `mode` sets the new file's permissions. */
+export function writeFileAtomic(file: string, data: string, mode?: number): void {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.${randomUUID()}.tmp`;
   try {
-    fs.writeFileSync(tmp, data);
+    fs.writeFileSync(tmp, data, { mode });
     fs.renameSync(tmp, file);
   } catch (e) {
     fs.rmSync(tmp, { force: true });

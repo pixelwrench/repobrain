@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { findSymbolLines, makeAnchor } from "./anchor.js";
+import { login, logout, resolveSite, type LoginDeps, type LoginOutput } from "./auth.js";
 import {
   baselineStatus, draftBaselineArea, planBaseline, setAreaSkipped, type AreaDraftReport, type BaselineArea, type BaselineStatus, type PlanReport,
 } from "./baseline.js";
@@ -143,6 +144,9 @@ export interface ShowOutput {
   atCommit: { commit: string; lines: string | null };
 }
 
+/** `login` and `logout`: the site, and whether this machine is now signed in to it. Tokens are never printed. */
+export type { LoginOutput };
+
 /** `baseline plan`: the plan saved (or the existing one), what was sent, and the call's cost. */
 export type BaselinePlanOutput = PlanReport;
 /** `baseline draft`: the area drafted, cards written, files not sent, and the call's cost. */
@@ -155,7 +159,7 @@ export type BaselineAreaOutput = BaselineArea;
 export type CliOutput =
   | ErrorOutput | CurateUnreadable | ConnectOutput | CaptureOutput | WeekOutput | CurateOutput
   | DueOutput | GradeOutput | StatsOutput | CardOutput | AnswerOutput | ShowOutput
-  | BaselinePlanOutput | BaselineDraftOutput | BaselineStatusOutput | BaselineAreaOutput;
+  | BaselinePlanOutput | BaselineDraftOutput | BaselineStatusOutput | BaselineAreaOutput | LoginOutput;
 
 export interface CliResult {
   /** 0 on success, 1 on a failure, 2 on bad arguments. */
@@ -167,9 +171,12 @@ export interface CliResult {
 export interface CliDeps {
   now?: () => Date;
   run?: RunClaude;
+  /** Stand-ins for the browser sign-in, for tests. */
+  login?: LoginDeps;
 }
 
-const USAGE = "usage: repobrain <connect|capture|week|curate|show|due|answer|grade|stats|card|baseline> [--repo <path>]";
+const USAGE =
+  "usage: repobrain <connect|capture|week|curate|show|due|answer|grade|stats|card|baseline> [--repo <path>], or repobrain login|logout [--site <url>]";
 const BASELINE_USAGE =
   "usage: repobrain baseline plan [--force] [--no-fetch], baseline draft <area-id>|--next, baseline status, baseline skip <area-id>, baseline unskip <area-id>";
 const CURATE_USAGE = "usage: repobrain curate <id> keep|fix|drop, or curate <id> fix --path P --lines S-E [--symbol X|--no-symbol]";
@@ -327,6 +334,7 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
         "no-symbol": { type: "boolean" },
         force: { type: "boolean" },
         next: { type: "boolean" },
+        site: { type: "string" },
       },
     });
   } catch (e) {
@@ -336,6 +344,16 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
   const { values, positionals } = parsed;
 
   switch (command) {
+    case "login":
+    case "logout": {
+      let site: string;
+      try {
+        site = resolveSite(values.site);
+      } catch (e) {
+        return usage(message(e));
+      }
+      return ok(command === "login" ? await login(site, deps.login) : logout(site));
+    }
     case "connect": {
       const depth = count(values["area-depth"]);
       if (depth === null) return usage("--area-depth must be a positive integer");

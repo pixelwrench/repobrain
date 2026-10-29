@@ -113,12 +113,17 @@ The plugin puts the `repobrain` CLI on the PATH of Claude Code's Bash tool. Outs
 | `baseline draft <area-id>\|--next` | Drafts one area's cards: a named planned or failed area, or the first planned one. |
 | `baseline status` | Shows the plan, each area's status, totals and the total known cost. |
 | `baseline skip <area-id>`, `baseline unskip <area-id>` | Skips a planned or failed area, or puts a skipped one back. |
+| `login [--site URL]` | Signs in to the RepoBrain site in your browser (OAuth with PKCE, redirecting back to a one-off listener on 127.0.0.1), and stores the tokens in `auth.json`. Waits up to 5 minutes. Tokens are never printed. |
+| `logout [--site URL]` | Forgets that site's sign-in. Other sites are kept. |
+
+The site is `--site`, else `REPOBRAIN_SITE`, else `https://repobrain.com`. Until the site is deployed, use `--site http://localhost:3000` against a local copy. Plain `http` is accepted only for `localhost` and `127.0.0.1`.
 
 ## Files
 
 ```
 ~/.repobrain/
   config.json           connected repositories
+  auth.json             each site's OAuth client and tokens, from repobrain login (mode 0600; keep it private)
   run/                  empty folder that claude -p runs in
   capture-errors.log    capture errors that couldn't be tied to a repository, and anything a background capture prints to stderr
   repos/<key>/          one per repository; <key> is the folder name plus a short hash of its path
