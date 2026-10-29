@@ -2,7 +2,7 @@
 
 Remember the code your AI agents write. RepoBrain is a Claude Code plugin and a small TypeScript CLI. When a change is merged into your default branch, your own Claude drafts a few spaced-repetition cards about it: why the code is the way it is, where behaviour lives, and what breaks if it changes. Once a week you keep, fix or drop the drafts in `/repobrain:week`, and `/repobrain:review` quizzes you on the ones you kept. Scheduling uses FSRS-6.
 
-**Your code never leaves your machine except to your own Claude, which drafts the cards.** In practice: the merge's secret-filtered diff and its one-line title go through your own `claude` CLI to Anthropic, or to whichever provider your `claude` is set up to use, and nowhere else. RepoBrain has no telemetry, and works with no account or server: cards, review history and scores are plain files in `~/.repobrain`. You can choose to sync a repository's cards with the RepoBrain site, which sends cards but never code (see [Sync with the RepoBrain site](#sync-with-the-repobrain-site-optional)).
+**Your source files and diffs never leave your machine except to your own Claude, which drafts the cards.** In practice: the merge's secret-filtered diff and its one-line title go through your own `claude` CLI to Anthropic, or to whichever provider your `claude` is set up to use, and nowhere else. RepoBrain has no telemetry, and works with no account or server: cards, review history and scores are plain files in `~/.repobrain`. You can choose to sync a repository's cards with the RepoBrain site. That never sends your source files or diffs, but card text can quote short fragments of code (see [Sync with the RepoBrain site](#sync-with-the-repobrain-site-optional)).
 
 ## Requirements
 
@@ -75,7 +75,7 @@ Capture only sees new merges. If you're new to a codebase, `/repobrain:baseline`
 Without this, everything stays on your machine. With it, your cards live on the RepoBrain site: you curate them there or in Claude Code, and the site schedules your reviews.
 
 1. **Sign in once:** `repobrain login`. It opens the site in your browser and stores the sign-in in `auth.json`.
-2. **Link a repository:** `repobrain link`, from inside it. This uploads every card the repository has, with its status. Your local review history isn't uploaded, so the site's schedule starts fresh.
+2. **Link a repository:** `repobrain link`, from inside it. This uploads every card the repository has, with its status. Your local review history isn't uploaded, so the site's schedule starts fresh. Linking again later carries your local keep and drop decisions only for cards the site still holds as drafts; a card you already kept or dropped on the site keeps the site's decision.
 
 From then on, each capture uploads new drafts and anchor changes in the background, within 90 seconds. If the upload fails, the capture still stands, and the cards are sent next time.
 
@@ -83,9 +83,11 @@ From then on, each capture uploads new drafts and anchor changes in the backgrou
 - each card's text, id, area and status;
 - its anchor metadata: the commit, path, symbol, line range, fingerprint and anchor status;
 - the merge's commit id and title, and whether the card came from a merge or a baseline;
-- the repository's folder name.
+- the repository's folder name;
+- your review grades;
+- card text you fix with `curate`.
 
-Code is never sent. The site scans the cards for secrets again and refuses any that look like they hold one. `repobrain link` lists the cards it refused, `capture.log` notes them, and `curate` says why when you try to keep one. A refused card can still be dropped, locally.
+Your source files and diffs are never sent. Card text, written by your Claude, can name identifiers or quote short fragments of code, and file paths and symbol names are sent as anchor metadata. The site scans the cards for secrets again and refuses any that look like they hold one. `repobrain link` lists the cards it refused, `capture.log` notes them, and `curate` says why when you try to keep one. A refused card can still be dropped, locally.
 
 **The site becomes the source for curation and reviews.**
 - `/repobrain:week` lists the site's drafts and flagged cards. Your decisions are saved on the site, then in the local card file, and also show on the site's page for the repository.
@@ -206,7 +208,7 @@ A flashcard uses `Front:` and `Back:` instead. `source` is `merge` or `baseline`
 
 ## Privacy and safety
 
-- **What is sent, and where.** For each merge: a fixed prompt, the merge's title (one line, up to 200 characters) and its filtered diff. For a baseline plan: the file list with line counts and the README excerpt; for each baseline area: its filtered files (see [Baseline](#baseline)). They go to your `claude` CLI, which sends them to Anthropic or to the provider it is configured for. Apart from that, RepoBrain's only network call is `git fetch origin`, unless you link a repository to the RepoBrain site, which then gets that repository's cards and anchor metadata but never code (see [Sync with the RepoBrain site](#sync-with-the-repobrain-site-optional)).
+- **What is sent, and where.** For each merge: a fixed prompt, the merge's title (one line, up to 200 characters) and its filtered diff. For a baseline plan: the file list with line counts and the README excerpt; for each baseline area: its filtered files (see [Baseline](#baseline)). They go to your `claude` CLI, which sends them to Anthropic or to the provider it is configured for. Apart from that, RepoBrain's only network call is `git fetch origin`, unless you link a repository to the RepoBrain site, which then gets that repository's cards, anchor metadata and your review grades, but never your source files or diffs. Card text can name identifiers or quote short fragments of code (see [Sync with the RepoBrain site](#sync-with-the-repobrain-site-optional)).
 - **What is filtered first.**
   - Excluded paths (above) and `.repobrain/ignore`.
   - Whole files with sensitive names: `.env*`, `.npmrc`, `.netrc`, `.pypirc`, `.pgpass`, `credentials.json`, `service-account*.json`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.p8`, `*.jks`, `*.keystore`, `*.tfstate`, `id_rsa*`, `id_ed25519*` and `id_ecdsa*`.

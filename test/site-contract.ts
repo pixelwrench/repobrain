@@ -58,7 +58,7 @@ export const curateCardInput = z.object({
   body: body.optional(),
 });
 
-// The site's existing quiz tools (web/src/server/mcp/tools.ts).
+// Inputs to the site's existing quiz tools: the site's MCP tools.
 export const getDueCardsInput = z.object({ deckId: z.string().min(1).optional() });
 export const getDeckInput = z.object({ deckId: z.string().min(1), offset: z.number().int().min(0).optional(), limit: z.number().int().min(1).max(200).optional() });
 export const recordQuizResultsInput = z.object({
@@ -80,7 +80,7 @@ export const toolInputs: Record<string, z.ZodType> = {
   record_quiz_results: recordQuizResultsInput.extend({ outcomes: z.array(recordQuizResultsInput.shape.outcomes.element.strict()).min(1).max(500) }).strict(),
 };
 
-// ---- Outputs: what the site's quiz tools return (cardForMcp in web/src/server/mcp/tools.ts). ----
+// ---- Outputs: what the site's quiz tools return (cardForMcp, in the site's MCP tools). ----
 
 /** A repo card's link back to the plugin: its card id and the site's copy of its anchor. */
 const repoCard = z.object({ id: submittedCard.shape.id, path: z.string(), startLine: z.number().int(), endLine: z.number().int(), status: anchor.shape.status }).strict();
