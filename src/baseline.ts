@@ -170,12 +170,14 @@ export function validateAreas(raws: unknown[], sent: Set<string>): { areas: Base
 
 /**
  * The text files the baseline may send at `commit`: not excluded (capture's exclusions and
- * `.codebrain/ignore`), not a sensitive path, and no control characters, which would break the
- * one-path-per-line list. `only` limits the check to those paths.
+ * `.codebrain/ignore`), not a sensitive path, no secret-looking text in the path itself, and no
+ * control characters, which would break the one-path-per-line list. `only` limits the check to those paths.
  */
 function sendableFiles(key: string, repoPath: string, commit: string, only?: string[]): TreeFile[] {
   const excludes = repoExcludes(repoPath, (line, why) => appendLog(key, `ignore line dropped: ${JSON.stringify(line)} (${why})`));
-  return treeFiles(repoPath, commit, excludes, only).filter((f) => !isSensitivePath(f.path) && !/[\u0000-\u001f]/.test(f.path));
+  return treeFiles(repoPath, commit, excludes, only).filter(
+    (f) => !isSensitivePath(f.path) && !/[\u0000-\u001f]/.test(f.path) && findSecrets(f.path).length === 0,
+  );
 }
 
 /** The README at the repo root to send: README.md, else README, else the first other readme.*. */

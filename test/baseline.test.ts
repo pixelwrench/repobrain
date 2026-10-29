@@ -77,6 +77,16 @@ describe("baseline", () => {
       expect(out.sent?.readme).toBeNull();
     });
 
+    it("leaves out files whose path looks like it holds a secret", async () => {
+      const token = "ghp_" + "b".repeat(36);
+      commit(repo, { [`docs/${token}.md`]: "notes\n" }, "oops");
+      let stdin = "";
+      const out = await plan(async (_p, s) => ((stdin = s), reply(twoAreas)));
+      expect(stdin).not.toContain(token);
+      expect(stdin).toContain("src/ref.ts\t5\n");
+      expect(out.sent?.files).toBe(4);
+    });
+
     it("sends at most 8,000 bytes of the README", async () => {
       commit(repo, { "README.md": "r".repeat(9_000) + "TAIL" }, "long readme");
       let stdin = "";
