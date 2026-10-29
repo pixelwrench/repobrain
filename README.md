@@ -2,7 +2,7 @@
 
 Remember the code your AI agents write. RepoBrain is a Claude Code plugin and a small TypeScript CLI. When a change is merged into your default branch, your own Claude drafts a few spaced-repetition cards about it: why the code is the way it is, where behaviour lives, and what breaks if it changes. Once a week you keep, fix or drop the drafts in `/repobrain:week`, and `/repobrain:review` quizzes you on the ones you kept. Scheduling uses FSRS-6.
 
-**Your code never leaves your machine except to your own Claude, which drafts the cards.** In practice: the merge's secret-filtered diff and its one-line title go through your own `claude` CLI to Anthropic, or to whichever provider your `claude` is set up to use, and nowhere else. RepoBrain has no server, no account and no telemetry. Cards, review history and scores are plain files in `~/.repobrain`.
+**Your code never leaves your machine except to your own Claude, which drafts the cards.** In practice: the merge's secret-filtered diff and its one-line title go through your own `claude` CLI to Anthropic, or to whichever provider your `claude` is set up to use, and nowhere else. RepoBrain has no telemetry, and works with no account or server: cards, review history and scores are plain files in `~/.repobrain`. You can choose to sync a repository's cards with the RepoBrain site, which sends cards but never code (see [Sync with the RepoBrain site](#sync-with-the-repobrain-site-optional)).
 
 ## Requirements
 
@@ -70,6 +70,34 @@ Capture only sees new merges. If you're new to a codebase, `/repobrain:baseline`
 
 **Pacing and cost.** Each area is one `claude -p` call, with the same flags, empty folder, budget and timeout as capture, and only when you ask, so you approve the spend area by area. The plan is one more call. Each call's reported cost goes to `capture.log` and the command's output, and `repobrain baseline status` sums the known costs. If Claude is unavailable the area stays planned; if the call fails, runs over budget or yields no usable cards, the area is marked failed and can be drafted again by id. A baseline and a capture never run at the same time. `plan --force` starts a new plan at the current head, with new card ids; cards already drafted stay as they are.
 
+## Sync with the RepoBrain site (optional)
+
+Without this, everything stays on your machine. With it, your cards live on the RepoBrain site: you curate them there or in Claude Code, and the site schedules your reviews.
+
+1. **Sign in once:** `repobrain login`. It opens the site in your browser and stores the sign-in in `auth.json`.
+2. **Link a repository:** `repobrain link`, from inside it. This uploads every card the repository has, with its status. Your local review history isn't uploaded, so the site's schedule starts fresh.
+
+From then on, each capture uploads new drafts and anchor changes in the background, within 90 seconds. If the upload fails, the capture still stands, and the cards are sent next time.
+
+**What is sent.** Only finished cards, after the secret filter:
+- each card's text, id, area and status;
+- its anchor metadata: the commit, path, symbol, line range, fingerprint and anchor status;
+- the merge's commit id and title, and whether the card came from a merge or a baseline;
+- the repository's folder name.
+
+Code is never sent. The site scans the cards for secrets again and refuses any that look like they hold one. `repobrain link` lists the cards it refused, `capture.log` notes them, and `curate` says why when you try to keep one. A refused card can still be dropped, locally.
+
+**The site becomes the source for curation and reviews.**
+- `/repobrain:week` lists the site's drafts and flagged cards. Your decisions are saved on the site, then in the local card file, and also show on the site's page for the repository.
+- `/repobrain:review` gets its due cards from the site, which schedules them with FSRS, and records your grades there.
+- Only `week` works offline: when the site can't be reached, it shows the local cards and says why. The other commands report the error.
+- `repobrain stats` stays local. It keeps counting the plugin's drafts and curation decisions, but its review counts stop growing once the repository is linked.
+- Every command that uses the site gives up after 45 seconds.
+
+**Stopping.** `repobrain unlink` stops syncing the repository; the site keeps its copy of the cards. `repobrain logout` forgets the sign-in on this machine.
+
+**Which site.** `--site`, else `REPOBRAIN_SITE`, else `https://repobrain.com`. Until the site is deployed, pass `--site http://localhost:3000` to `login` and `link` to use a local copy. Plain `http` is accepted only for `localhost`, `127.0.0.1` and `[::1]`.
+
 ## Options
 
 These are environment variables, read by the background capture. Set them in the environment you start Claude Code from.
@@ -80,6 +108,7 @@ These are environment variables, read by the background capture. Set them in the
 | `REPOBRAIN_MAX_BUDGET_USD` | `0.50` | Budget per merge, passed to `claude --max-budget-usd`. Must be a positive number; anything else falls back to the default. |
 | `REPOBRAIN_SETTING_SOURCES` | `""` | `""` loads no Claude settings files. `user` also loads `~/.claude/settings.json`, for people whose Claude auth is set there. That also turns on your user-level hooks and plugins in the drafting run, so they run once per merge (RepoBrain's own hook does nothing there). Any other value counts as `""`, so a repository's project or local settings never load. |
 | `REPOBRAIN_MODEL` | unset | The model for drafting, passed to `claude --model` (an alias such as `sonnet`, or a full model name). Unset uses your `claude` default. |
+| `REPOBRAIN_SITE` | `https://repobrain.com` | The RepoBrain site for `login`, `logout` and `link`, when `--site` isn't given. A linked repository keeps the site it was linked to. |
 
 **`.repobrain/ignore`**, at the root of your repository: one git pathspec glob per line, relative to the repository root, such as `**/fixtures/**` or `secrets/**`, and `#` for comments. Matching paths are never sent to Claude. This is not gitignore syntax: a leading `/` is accepted and stripped, but there is no `!` negation, no `..`, and a pattern without `**/` matches from the root only. Lines starting with `!` or `:`, lines with a `..` segment, and any line git rejects as a pathspec are skipped, and each one is noted in `capture.log`. If git still rejects the exclude list for a merge, capture stops without counting it against the merge, and `/repobrain:week` shows the error.
 
@@ -115,20 +144,23 @@ The plugin puts the `repobrain` CLI on the PATH of Claude Code's Bash tool. Outs
 | `baseline skip <area-id>`, `baseline unskip <area-id>` | Skips a planned or failed area, or puts a skipped one back. |
 | `login [--site URL]` | Signs in to the RepoBrain site in your browser (OAuth with PKCE, redirecting back to a one-off listener on 127.0.0.1), and stores the tokens in `auth.json`. Waits up to 5 minutes. Tokens are never printed. |
 | `logout [--site URL]` | Forgets that site's sign-in. Other sites are kept. |
+| `link [--site URL]` | Links the repository to the site and uploads all its cards. Needs `login` first. Linking again, or to another site, uploads them all again. |
+| `unlink` | Stops syncing the repository. The site keeps its copy of the cards. |
 
-The site is `--site`, else `REPOBRAIN_SITE`, else `https://repobrain.com`. Until the site is deployed, use `--site http://localhost:3000` against a local copy. Plain `http` is accepted only for `localhost`, `127.0.0.1` and `[::1]`.
+In a linked repository, `week`, `curate`, `due`, `show`, `answer` and `grade` use the site (see [Sync with the RepoBrain site](#sync-with-the-repobrain-site-optional)). `due` then lists cards by the site's card ids, and `show`, `answer` and `grade` take those ids.
 
 ## Files
 
 ```
 ~/.repobrain/
-  config.json           connected repositories
+  config.json           connected repositories, and the site each linked one syncs with
   auth.json             each site's OAuth client and tokens, from repobrain login (mode 0600; keep it private)
+  auth.json.lock        held briefly while auth.json is updated or a sign-in is refreshed
   run/                  empty folder that claude -p runs in
   capture-errors.log    capture errors that couldn't be tied to a repository, and anything a background capture prints to stderr
   repos/<key>/          one per repository; <key> is the folder name plus a short hash of its path
     cards/<id>.md       one file per card
-    state.json          the last merge processed, recent merges, strikes, Claude availability, the last capture error
+    state.json          the last merge processed, recent merges, strikes, Claude availability, the last capture error, and what the site has been sent
     schedule.json       FSRS state per card
     reviews.jsonl       every grade
     curation.jsonl      every keep, fix and drop
@@ -174,7 +206,7 @@ A flashcard uses `Front:` and `Back:` instead. `source` is `merge` or `baseline`
 
 ## Privacy and safety
 
-- **What is sent, and where.** For each merge: a fixed prompt, the merge's title (one line, up to 200 characters) and its filtered diff. For a baseline plan: the file list with line counts and the README excerpt; for each baseline area: its filtered files (see [Baseline](#baseline)). They go to your `claude` CLI, which sends them to Anthropic or to the provider it is configured for. RepoBrain sends nothing anywhere else. The only other network call it makes is `git fetch origin`.
+- **What is sent, and where.** For each merge: a fixed prompt, the merge's title (one line, up to 200 characters) and its filtered diff. For a baseline plan: the file list with line counts and the README excerpt; for each baseline area: its filtered files (see [Baseline](#baseline)). They go to your `claude` CLI, which sends them to Anthropic or to the provider it is configured for. Apart from that, RepoBrain's only network call is `git fetch origin`, unless you link a repository to the RepoBrain site, which then gets that repository's cards and anchor metadata but never code (see [Sync with the RepoBrain site](#sync-with-the-repobrain-site-optional)).
 - **What is filtered first.**
   - Excluded paths (above) and `.repobrain/ignore`.
   - Whole files with sensitive names: `.env*`, `.npmrc`, `.netrc`, `.pypirc`, `.pgpass`, `credentials.json`, `service-account*.json`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.p8`, `*.jks`, `*.keystore`, `*.tfstate`, `id_rsa*`, `id_ed25519*` and `id_ecdsa*`.
@@ -183,7 +215,7 @@ A flashcard uses `Front:` and `Back:` instead. `source` is `merge` or `baseline`
 
   The filter is a built-in pattern set, not a guarantee. Use `.repobrain/ignore` for anything that must never be sent.
 - **The model can do nothing but reply.** It runs with no tools, no MCP servers and one turn, from an empty folder, and the diff is passed to it as data. Its reply is parsed as JSON and checked before anything is written. Cards containing URLs or secret-looking text are rejected.
-- **Everything stays local.** Cards, grades, schedules and logs live only in `~/.repobrain`. Nothing is synced.
+- **Everything stays local unless you link.** Cards, grades, schedules and logs live in `~/.repobrain`. Nothing is synced until you run `repobrain link`.
 - **No pressure.** There are no streaks, no daily goals and nothing locked behind reviews. Review when you want to.
 
 ## Development

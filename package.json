@@ -1,6 +1,6 @@
 {
   "name": "repobrain",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Remember the code your AI agents write: spaced-repetition cards from merged changes, drafted by your own Claude.",
   "license": "MIT",
   "type": "module",
