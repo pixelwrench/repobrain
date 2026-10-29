@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { findSymbolLines, makeAnchor } from "./anchor.js";
-import { login, logout, resolveSite, type LoginDeps, type LoginOutput } from "./auth.js";
+import { isSignedIn, login, logout, resolveSite, type LoginDeps, type LoginOutput } from "./auth.js";
 import {
   baselineStatus, draftBaselineArea, planBaseline, setAreaSkipped, type AreaDraftReport, type BaselineArea, type BaselineStatus, type PlanReport,
 } from "./baseline.js";
@@ -10,11 +10,13 @@ import { runCapture, type CaptureReport } from "./capture.js";
 import { areaOf, CARD_SOURCES, LETTERS, type Anchor, type AnchorStatus, type Card, type CardBody, type CardSource, type CardStatus } from "./format.js";
 import type { RunClaude } from "./generate.js";
 import { defaultBranch, fileAt, resolveCommit } from "./git.js";
+import { connectRemote, type Remote } from "./remote.js";
 import { dueCards, loadSchedule, recordGrade, type Grade } from "./schedule.js";
 import {
   appendJsonl, appendLog, cardPath, connectRepo, findRepo, home, isSafeId, listCardsReport, readCard, readJsonl, readState, writeCard,
   type CardListing, type RepoState,
 } from "./store.js";
+import { linkRepo, unlinkRepo, type LinkOutput, type UnlinkOutput } from "./sync.js";
 
 // ---- Output shapes: every command prints one of these as JSON on stdout. ----
 
@@ -146,6 +148,10 @@ export interface ShowOutput {
 
 /** `login` and `logout`: the site, and whether this machine is now signed in to it. Tokens are never printed. */
 export type { LoginOutput };
+/** `link`: the site's repo and deck, how many cards it now holds, and the cards it refused. */
+export type { LinkOutput };
+/** `unlink`: the site the repo was linked to, or null. */
+export type { UnlinkOutput };
 
 /** `baseline plan`: the plan saved (or the existing one), what was sent, and the call's cost. */
 export type BaselinePlanOutput = PlanReport;
@@ -159,7 +165,7 @@ export type BaselineAreaOutput = BaselineArea;
 export type CliOutput =
   | ErrorOutput | CurateUnreadable | ConnectOutput | CaptureOutput | WeekOutput | CurateOutput
   | DueOutput | GradeOutput | StatsOutput | CardOutput | AnswerOutput | ShowOutput
-  | BaselinePlanOutput | BaselineDraftOutput | BaselineStatusOutput | BaselineAreaOutput | LoginOutput;
+  | BaselinePlanOutput | BaselineDraftOutput | BaselineStatusOutput | BaselineAreaOutput | LoginOutput | LinkOutput | UnlinkOutput;
 
 export interface CliResult {
   /** 0 on success, 1 on a failure, 2 on bad arguments. */
@@ -173,10 +179,12 @@ export interface CliDeps {
   run?: RunClaude;
   /** Stand-ins for the browser sign-in, for tests. */
   login?: LoginDeps;
+  /** Connects to the site with the stored sign-in; tests pass a fake. */
+  connect?: (site: string) => Promise<Remote>;
 }
 
 const USAGE =
-  "usage: repobrain <connect|capture|week|curate|show|due|answer|grade|stats|card|baseline> [--repo <path>], or repobrain login|logout [--site <url>]";
+  "usage: repobrain <connect|capture|week|curate|show|due|answer|grade|stats|card|baseline> [--repo <path>], or repobrain login|logout|link [--site <url>], or repobrain unlink";
 const BASELINE_USAGE =
   "usage: repobrain baseline plan [--force] [--no-fetch], baseline draft <area-id>|--next, baseline status, baseline skip <area-id>, baseline unskip <area-id>";
 const CURATE_USAGE = "usage: repobrain curate <id> keep|fix|drop, or curate <id> fix --path P --lines S-E [--symbol X|--no-symbol]";
@@ -354,6 +362,27 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
         return usage(message(e));
       }
       return ok(command === "login" ? await login(site, deps.login) : logout(site));
+    }
+    case "link": {
+      if (positionals.length > 0) return usage(`unexpected argument ${JSON.stringify(positionals[0])}\n${USAGE}`);
+      let site: string;
+      try {
+        site = resolveSite(values.site);
+      } catch (e) {
+        return usage(message(e));
+      }
+      const { key, repoPath } = connected(values.repo);
+      if (!isSignedIn(site)) return fail(`not signed in to ${site}: run repobrain login --site ${site}`);
+      const remote = await (deps.connect ?? connectRemote)(site);
+      try {
+        return ok(await linkRepo(key, repoPath, site, remote, now));
+      } finally {
+        await remote.close().catch(() => {});
+      }
+    }
+    case "unlink": {
+      if (positionals.length > 0) return usage(`unexpected argument ${JSON.stringify(positionals[0])}\n${USAGE}`);
+      return ok(unlinkRepo(connected(values.repo).key));
     }
     case "connect": {
       const depth = count(values["area-depth"]);

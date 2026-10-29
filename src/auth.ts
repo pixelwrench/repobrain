@@ -143,6 +143,11 @@ function updateSite(site: string, change: (entry: SiteAuth) => SiteAuth | undefi
   });
 }
 
+/** Whether `repobrain login` stored tokens for the site. */
+export function isSignedIn(site: string): boolean {
+  return readAuthFile().sites[site]?.tokens !== undefined;
+}
+
 const notSignedIn = (site: string): UnauthorizedError =>
   new UnauthorizedError(`not signed in to ${site}: run repobrain login --site ${site}`);
 

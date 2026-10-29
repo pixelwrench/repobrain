@@ -619,7 +619,7 @@ var init_fsrs_6_Bt0f3F6X = __esm({
 
 // src/cli.ts
 import fs6 from "node:fs";
-import path9 from "node:path";
+import path10 from "node:path";
 import { parseArgs } from "node:util";
 
 // src/anchor.ts
@@ -735,10 +735,10 @@ function treeFiles(repo, sha, excludes, only) {
     return m && m[1] !== "-" ? [{ path: m[3], lines: Number(m[1]) }] : [];
   });
 }
-function fileAt(repo, rev, path10) {
-  if (path10 === "") return null;
+function fileAt(repo, rev, path11) {
+  if (path11 === "") return null;
   try {
-    return git(repo, ["cat-file", "blob", `${rev}:${path10}`]);
+    return git(repo, ["cat-file", "blob", `${rev}:${path11}`]);
   } catch {
     return null;
   }
@@ -789,8 +789,8 @@ function findSymbolLines(content, symbol) {
   const re = symbolPattern(symbol);
   return content.split("\n").flatMap((line, i) => re.test(line) ? [i + 1] : []);
 }
-function makeAnchor(repo, commit, path10, startLine, endLine, symbol) {
-  const content = fileAt(repo, commit, path10);
+function makeAnchor(repo, commit, path11, startLine, endLine, symbol) {
+  const content = fileAt(repo, commit, path11);
   if (content === null) return null;
   const all = content.split("\n");
   const lastLine = content.endsWith("\n") ? all.length - 1 : all.length;
@@ -811,7 +811,7 @@ function makeAnchor(repo, commit, path10, startLine, endLine, symbol) {
   if (wordChars(block) < MIN_WORD_CHARS) return null;
   return {
     commit,
-    path: path10,
+    path: path11,
     symbol: symbol && hasSymbol(content, symbol) ? symbol : null,
     startLine: start,
     endLine: end,
@@ -1146,10 +1146,10 @@ function mergeDefs(...defs) {
 function cloneDef(schema) {
   return mergeDefs(schema._zod.def);
 }
-function getElementAtPath(obj, path10) {
-  if (!path10)
+function getElementAtPath(obj, path11) {
+  if (!path11)
     return obj;
-  return path10.reduce((acc, key) => acc?.[key], obj);
+  return path11.reduce((acc, key) => acc?.[key], obj);
 }
 function promiseAllObject(promisesObj) {
   const keys = Object.keys(promisesObj);
@@ -1489,11 +1489,11 @@ function explicitlyAborted(x, startIndex = 0) {
   }
   return false;
 }
-function prefixIssues(path10, issues) {
+function prefixIssues(path11, issues) {
   return issues.map((iss) => {
     var _a3;
     (_a3 = iss).path ?? (_a3.path = []);
-    iss.path.unshift(path10);
+    iss.path.unshift(path11);
     return iss;
   });
 }
@@ -1954,16 +1954,16 @@ function flattenError(error2, mapper = (issue2) => issue2.message) {
 }
 function formatError(error2, mapper = (issue2) => issue2.message) {
   const fieldErrors = { _errors: [] };
-  const processError = (error3, path10 = []) => {
+  const processError = (error3, path11 = []) => {
     for (const issue2 of error3.issues) {
       if (issue2.code === "invalid_union" && issue2.errors.length) {
-        issue2.errors.map((issues) => processError({ issues }, [...path10, ...issue2.path]));
+        issue2.errors.map((issues) => processError({ issues }, [...path11, ...issue2.path]));
       } else if (issue2.code === "invalid_key") {
-        processError({ issues: issue2.issues }, [...path10, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path11, ...issue2.path]);
       } else if (issue2.code === "invalid_element") {
-        processError({ issues: issue2.issues }, [...path10, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path11, ...issue2.path]);
       } else {
-        const fullpath = [...path10, ...issue2.path];
+        const fullpath = [...path11, ...issue2.path];
         if (fullpath.length === 0) {
           fieldErrors._errors.push(mapper(issue2));
         } else {
@@ -11310,9 +11310,9 @@ var rev2026Codec = {
     });
     const parsed = buildSchemas2026().RequestMetaEnvelopeSchema.safeParse(meta2);
     if (!parsed.success) for (const issue2 of parsed.error.issues) {
-      const path10 = issue2.path.map(String);
-      const key = path10.length > 0 ? path10.join(".") : "_meta";
-      if (path10.length === 1 && issues.some((existing) => existing.key === key && existing.problem === "missing")) continue;
+      const path11 = issue2.path.map(String);
+      const key = path11.length > 0 ? path11.join(".") : "_meta";
+      if (path11.length === 1 && issues.some((existing) => existing.key === key && existing.problem === "missing")) continue;
       issues.push({
         key,
         problem: issue2.message
@@ -11617,17 +11617,17 @@ function scanXMcpHeaderDeclarations(inputSchema) {
   const declarations = [];
   const seenLower = /* @__PURE__ */ new Map();
   let numberFault;
-  const visit = (node2, path10, reachable) => {
+  const visit = (node2, path11, reachable) => {
     if (node2 === null || typeof node2 !== "object") return void 0;
     const schema = node2;
     if (X_MCP_HEADER_KEY in schema) {
-      if (!reachable || path10.length === 0) return `${pathName(path10)}: x-mcp-header is only permitted on properties statically reachable via a chain of 'properties' keys (not under items, additionalProperties, oneOf/anyOf/allOf/not, if/then/else, or $ref)`;
+      if (!reachable || path11.length === 0) return `${pathName(path11)}: x-mcp-header is only permitted on properties statically reachable via a chain of 'properties' keys (not under items, additionalProperties, oneOf/anyOf/allOf/not, if/then/else, or $ref)`;
       const raw = schema[X_MCP_HEADER_KEY];
-      if (typeof raw !== "string" || raw.length === 0) return `${pathName(path10)}: x-mcp-header MUST be a non-empty string`;
-      if (!RFC9110_TOKEN.test(raw)) return `${pathName(path10)}: x-mcp-header '${raw}' is not a valid RFC 9110 token (no spaces, control characters or HTTP delimiters)`;
+      if (typeof raw !== "string" || raw.length === 0) return `${pathName(path11)}: x-mcp-header MUST be a non-empty string`;
+      if (!RFC9110_TOKEN.test(raw)) return `${pathName(path11)}: x-mcp-header '${raw}' is not a valid RFC 9110 token (no spaces, control characters or HTTP delimiters)`;
       const type = typeof schema.type === "string" ? schema.type : void 0;
       if (type === void 0 || !PERMITTED_X_MCP_HEADER_TYPES.has(type)) {
-        const fault$1 = `${pathName(path10)}: x-mcp-header is only permitted on primitive-typed properties (string, integer, boolean); got ${type ?? "<none>"}`;
+        const fault$1 = `${pathName(path11)}: x-mcp-header is only permitted on primitive-typed properties (string, integer, boolean); got ${type ?? "<none>"}`;
         if (type !== "number") return fault$1;
         numberFault ??= fault$1;
       }
@@ -11636,14 +11636,14 @@ function scanXMcpHeaderDeclarations(inputSchema) {
       if (prior !== void 0) return `x-mcp-header '${raw}' is not case-insensitively unique (also declared as '${prior}')`;
       seenLower.set(lower, raw);
       declarations.push({
-        path: path10,
+        path: path11,
         headerName: raw,
         type
       });
     }
     const properties = schema.properties;
     if (properties !== null && typeof properties === "object") for (const [key, child] of Object.entries(properties)) {
-      const fault$1 = visit(child, [...path10, key], reachable);
+      const fault$1 = visit(child, [...path11, key], reachable);
       if (fault$1 !== void 0) return fault$1;
     }
     for (const k of NON_REACHABLE_SUBSCHEMA_KEYWORDS) {
@@ -11651,7 +11651,7 @@ function scanXMcpHeaderDeclarations(inputSchema) {
       if (sub === void 0) continue;
       const branches = Array.isArray(sub) ? sub : sub !== null && typeof sub === "object" && OBJECT_VALUED_SUBSCHEMA_KEYWORDS.has(k) ? Object.values(sub) : [sub];
       for (const branch of branches) {
-        const fault$1 = visit(branch, [...path10, `<${k}>`], false);
+        const fault$1 = visit(branch, [...path11, `<${k}>`], false);
         if (fault$1 !== void 0) return fault$1;
       }
     }
@@ -11696,8 +11696,8 @@ var OBJECT_VALUED_SUBSCHEMA_KEYWORDS = /* @__PURE__ */ new Set([
   "$defs",
   "definitions"
 ]);
-function pathName(path10) {
-  return path10.length === 0 ? "<root>" : path10.join(".");
+function pathName(path11) {
+  return path11.length === 0 ? "<root>" : path11.join(".");
 }
 var BASE64_SENTINEL_PREFIX = "=?base64?";
 var BASE64_SENTINEL_SUFFIX = "?=";
@@ -11730,9 +11730,9 @@ function utf8ToBase64(s) {
 function encodeMcpParamValue(value) {
   return needsBase64(value) ? `${BASE64_SENTINEL_PREFIX}${utf8ToBase64(value)}${BASE64_SENTINEL_SUFFIX}` : value;
 }
-function valueAtPath(root, path10) {
+function valueAtPath(root, path11) {
   let node2 = root;
-  for (const key of path10) {
+  for (const key of path11) {
     if (node2 === null || typeof node2 !== "object") return void 0;
     node2 = node2[key];
   }
@@ -12010,7 +12010,7 @@ var PROPERTY_KEYS_BY_TYPE = {
   array: shapeKeys([UntitledMultiSelectEnumSchemaSchema, TitledMultiSelectEnumSchemaSchema])
 };
 var SUPPORTED_STRING_FORMATS = new Set(StringSchemaSchema.shape.format.unwrap().options);
-function walkProperty(node2, path10, vendor, unsupported) {
+function walkProperty(node2, path11, vendor, unsupported) {
   if (!isJsonObject(node2)) return node2;
   const allowedKeys = typeof node2.type === "string" && Object.hasOwn(PROPERTY_KEYS_BY_TYPE, node2.type) ? PROPERTY_KEYS_BY_TYPE[node2.type] : void 0;
   if (allowedKeys === void 0) return node2;
@@ -12018,8 +12018,8 @@ function walkProperty(node2, path10, vendor, unsupported) {
   for (const [key, value] of Object.entries(node2)) if (allowedKeys.has(key) || isAnnotationOnlyJsonSchemaKeyword(key)) pruned[key] = value;
   else if (key === "pattern" && node2.type === "string" && typeof node2.format === "string") {
     if (!SUPPORTED_STRING_FORMATS.has(node2.format)) pruned[key] = value;
-    else if (typeof value !== "string" || !isLibraryFormatPattern(node2.format, value, vendor)) unsupported.push(`${path10}.${key}`);
-  } else unsupported.push(`${path10}.${key}`);
+    else if (typeof value !== "string" || !isLibraryFormatPattern(node2.format, value, vendor)) unsupported.push(`${path11}.${key}`);
+  } else unsupported.push(`${path11}.${key}`);
   return pruned;
 }
 function walkRequestedSchema(converted, vendor) {
@@ -12036,11 +12036,11 @@ function describeUnsupportedProperties(pruned, fallback) {
   const offenders = Object.entries(pruned.properties).filter(([, node2]) => !parseSchema(PrimitiveSchemaDefinitionSchema, node2).success).map(([name]) => `properties.${name}`);
   return offenders.length > 0 ? offenders.join(", ") : fallback;
 }
-function findDroppedConstraintPaths(original, parsed, path10 = "") {
-  if (Array.isArray(original) && Array.isArray(parsed)) return original.flatMap((item, index) => findDroppedConstraintPaths(item, parsed[index], `${path10}[${index}]`));
+function findDroppedConstraintPaths(original, parsed, path11 = "") {
+  if (Array.isArray(original) && Array.isArray(parsed)) return original.flatMap((item, index) => findDroppedConstraintPaths(item, parsed[index], `${path11}[${index}]`));
   if (!isJsonObject(original) || !isJsonObject(parsed)) return [];
   return Object.entries(original).flatMap(([key, value]) => {
-    const childPath = path10 ? `${path10}.${key}` : key;
+    const childPath = path11 ? `${path11}.${key}` : key;
     if (!Object.prototype.hasOwnProperty.call(parsed, key)) return isAnnotationOnlyJsonSchemaKeyword(key) ? [] : [childPath];
     return findDroppedConstraintPaths(value, parsed[key], childPath);
   });
@@ -16306,8 +16306,8 @@ var require_utils = /* @__PURE__ */ __commonJSMin(((exports, module) => {
     for (let i = 0; i < str2.length; i++) if (str2[i] === token) ind++;
     return ind;
   }
-  function removeDotSegments(path10) {
-    let input = path10;
+  function removeDotSegments(path11) {
+    let input = path11;
     const output = [];
     let nextSlash = -1;
     let len = 0;
@@ -16645,8 +16645,8 @@ var require_schemes = /* @__PURE__ */ __commonJSMin(((exports, module) => {
     }
     if (wsComponent.resourceName) {
       const queryIndex = wsComponent.resourceName.indexOf("?");
-      const path10 = queryIndex === -1 ? wsComponent.resourceName : wsComponent.resourceName.slice(0, queryIndex);
-      wsComponent.path = path10 && path10 !== "/" ? path10 : void 0;
+      const path11 = queryIndex === -1 ? wsComponent.resourceName : wsComponent.resourceName.slice(0, queryIndex);
+      wsComponent.path = path11 && path11 !== "/" ? path11 : void 0;
       wsComponent.query = queryIndex === -1 ? void 0 : wsComponent.resourceName.slice(queryIndex + 1);
       wsComponent.resourceName = void 0;
     }
@@ -25163,8 +25163,8 @@ function parseCard(text) {
     body
   };
 }
-function areaOf(path10, depth) {
-  const dirs = path10.split("/").slice(0, -1);
+function areaOf(path11, depth) {
+  const dirs = path11.split("/").slice(0, -1);
   return dirs.length === 0 ? "(root)" : dirs.slice(0, depth).join("/");
 }
 
@@ -25233,6 +25233,16 @@ function connectRepo(dir, areaDepth = 3) {
   writeJson(configPath(), config2);
   fs2.mkdirSync(path2.join(repoDir(key), "cards"), { recursive: true });
   return key;
+}
+function setRemote(key, remote) {
+  const config2 = loadConfig();
+  const repo = config2.repos[key];
+  if (!repo) throw new Error(`unknown repo ${key}; run repobrain connect first`);
+  const before = repo.remote;
+  if (remote) repo.remote = remote;
+  else delete repo.remote;
+  writeJson(configPath(), config2);
+  return before;
 }
 function findRepo(dir, options, config2 = loadConfig()) {
   const roots = repoRoots(dir, options);
@@ -25479,6 +25489,9 @@ function updateSite(site, change) {
     else data.sites[site] = next;
     writeAuthFile(data);
   });
+}
+function isSignedIn(site) {
+  return readAuthFile().sites[site]?.tokens !== void 0;
 }
 var notSignedIn = (site) => new UnauthorizedError(`not signed in to ${site}: run repobrain login --site ${site}`);
 var FileOAuthProvider = class {
@@ -28426,8 +28439,116 @@ function dueCards(cards, sched, now) {
   });
 }
 
+// src/sync.ts
+import path9 from "node:path";
+var BATCH_SIZE = 20;
+var MAX_TITLE = 300;
+var MAX_NAME = 100;
+function toSubmitted(card) {
+  const a = card.anchor;
+  return {
+    id: card.id,
+    area: card.area,
+    status: card.status,
+    body: card.body,
+    anchor: { commit: a.commit, path: a.path, symbol: a.symbol, startLine: a.startLine, endLine: a.endLine, fingerprint: a.fingerprint, status: a.status }
+  };
+}
+var SHA = /^[0-9a-f]{7,64}$/;
+var CARD_ID = /^[A-Za-z0-9._-]{1,120}$/;
+var within = (s, min, max) => s.length >= min && s.length <= max;
+function unsendable(card) {
+  const a = card.anchor;
+  const b = card.body;
+  if (!CARD_ID.test(card.id)) return "card id is too long for the site";
+  if (!SHA.test(card.merge)) return "merge is not a commit id";
+  if (card.area.length > 200) return "area is over 200 characters";
+  if (!SHA.test(a.commit)) return "anchor commit is not a commit id";
+  if (!within(a.path, 1, 500)) return "anchor path is empty or over 500 characters";
+  if (a.symbol !== null && a.symbol.length > 200) return "anchor symbol is over 200 characters";
+  if (!Number.isInteger(a.startLine) || !Number.isInteger(a.endLine) || a.startLine < 1 || a.endLine < 1) return "anchor lines must be positive";
+  if (!within(a.fingerprint, 8, 128)) return "anchor fingerprint has the wrong length";
+  if (b.kind === "mcq") {
+    if (!within(b.question, 1, 1200)) return "question is empty or over 1200 characters";
+    if (b.choices.length < 2 || b.choices.length > 6 || b.choices.some((c) => !within(c, 1, 400))) return "choices must be 2-6, each 1-400 characters";
+    if (!within(b.explanation, 1, 1200)) return "explanation is empty or over 1200 characters";
+  } else if (!within(b.front, 1, 1200) || !within(b.back, 1, 1200)) {
+    return "front and back must each be 1-1200 characters";
+  }
+  return null;
+}
+var isStrings = (v) => Array.isArray(v) && v.every((x) => typeof x === "string");
+function checkSubmitResult(v) {
+  const r = v;
+  const ok2 = r !== null && typeof r === "object" && isStrings(r.accepted) && isStrings(r.unchanged) && Array.isArray(r.rejected) && r.rejected.every((x) => typeof x?.id === "string" && typeof x?.reason === "string");
+  if (!ok2) throw new RemoteError("submit_cards returned an unexpected result", "tool");
+  return r;
+}
+async function submitPending(key, remote) {
+  const state = readState(key);
+  const submitted = state.submitted ??= {};
+  const report = { uploaded: 0, rejected: [] };
+  const groups = /* @__PURE__ */ new Map();
+  for (const card of listCards(key)) {
+    if (submitted[card.id]) continue;
+    const why = unsendable(card);
+    if (why) {
+      report.rejected.push({ id: card.id, reason: why });
+      continue;
+    }
+    const group = JSON.stringify([card.merge, card.mergeTitle, card.source]);
+    groups.set(group, [...groups.get(group) ?? [], card]);
+  }
+  for (const cards of groups.values()) {
+    const { merge: merge2, mergeTitle, source } = cards[0];
+    for (let i = 0; i < cards.length; i += BATCH_SIZE) {
+      const batch = cards.slice(i, i + BATCH_SIZE);
+      const input = {
+        repo: key,
+        merge: merge2,
+        mergeTitle: mergeTitle.trim().slice(0, MAX_TITLE) || merge2,
+        source,
+        cards: batch.map(toSubmitted)
+      };
+      const result = checkSubmitResult(await remote.call("submit_cards", { ...input }));
+      const sent = new Set(batch.map((c) => c.id));
+      for (const id of [...result.accepted, ...result.unchanged]) {
+        if (!sent.has(id) || submitted[id]) continue;
+        submitted[id] = true;
+        report.uploaded++;
+      }
+      report.rejected.push(...result.rejected.filter((r) => sent.has(r.id)));
+      writeState(key, state);
+    }
+  }
+  return report;
+}
+var BUSY = "busy, try again: a capture or baseline is running";
+async function linkRepo(key, repoPath, site, remote, now = () => /* @__PURE__ */ new Date()) {
+  const lock = acquireLock(key);
+  if (!lock) throw new Error(BUSY);
+  try {
+    const name = path9.basename(repoPath).trim().slice(0, MAX_NAME) || key;
+    const linked = await remote.call("link_repo", { key, name });
+    if (typeof linked?.repoId !== "string" || typeof linked?.deckId !== "string") throw new RemoteError("link_repo returned an unexpected result", "tool");
+    const link = { site, repoId: linked.repoId, deckId: linked.deckId, linkedAt: now().toISOString() };
+    setRemote(key, link);
+    const state = readState(key);
+    delete state.submitted;
+    delete state.remoteAuth;
+    writeState(key, state);
+    const { uploaded, rejected } = await submitPending(key, remote);
+    return { repoId: link.repoId, deckId: link.deckId, uploaded, rejected };
+  } finally {
+    lock.release();
+  }
+}
+function unlinkRepo(key) {
+  return { unlinked: setRemote(key, void 0)?.site ?? null };
+}
+
 // src/cli.ts
-var USAGE = "usage: repobrain <connect|capture|week|curate|show|due|answer|grade|stats|card|baseline> [--repo <path>], or repobrain login|logout [--site <url>]";
+var USAGE = "usage: repobrain <connect|capture|week|curate|show|due|answer|grade|stats|card|baseline> [--repo <path>], or repobrain login|logout|link [--site <url>], or repobrain unlink";
 var BASELINE_USAGE = "usage: repobrain baseline plan [--force] [--no-fetch], baseline draft <area-id>|--next, baseline status, baseline skip <area-id>, baseline unskip <area-id>";
 var CURATE_USAGE = "usage: repobrain curate <id> keep|fix|drop, or curate <id> fix --path P --lines S-E [--symbol X|--no-symbol]";
 var DECISIONS = ["keep", "fix", "drop"];
@@ -28449,15 +28570,15 @@ function count(value) {
   return /^\d+$/.test(value) && Number(value) >= 1 ? Number(value) : null;
 }
 function connected(repo) {
-  const dir = path9.resolve(repo ?? process.cwd());
+  const dir = path10.resolve(repo ?? process.cwd());
   const found = findRepo(dir);
   if (!found) throw new Error(`${dir} is not connected to RepoBrain; run \`repobrain connect\` there first`);
   return { key: found.key, repoPath: found.config.path, areaDepth: found.config.areaDepth };
 }
 function repoRelativePath(p) {
-  if (!p || p.includes("\\") || p.includes("\0") || path9.posix.isAbsolute(p)) return null;
+  if (!p || p.includes("\\") || p.includes("\0") || path10.posix.isAbsolute(p)) return null;
   if (p.split("/").includes("..")) return null;
-  const normal = path9.posix.normalize(p);
+  const normal = path10.posix.normalize(p);
   return normal === "." || normal.endsWith("/") ? null : normal;
 }
 function lineRange(s) {
@@ -28471,7 +28592,7 @@ function logCaptureError(key, dir, msg) {
   try {
     if (key) return appendLog(key, `capture failed: ${msg}`);
     fs6.mkdirSync(home(), { recursive: true });
-    fs6.appendFileSync(path9.join(home(), "capture-errors.log"), `${(/* @__PURE__ */ new Date()).toISOString()} ${dir}: ${msg}
+    fs6.appendFileSync(path10.join(home(), "capture-errors.log"), `${(/* @__PURE__ */ new Date()).toISOString()} ${dir}: ${msg}
 `);
   } catch {
   }
@@ -28552,7 +28673,7 @@ async function dispatch(argv, deps) {
       }
     });
   } catch (e) {
-    if (command === "capture") logCaptureError(null, path9.resolve(process.cwd()), message4(e));
+    if (command === "capture") logCaptureError(null, path10.resolve(process.cwd()), message4(e));
     return usage(`${message4(e)}
 ${USAGE}`);
   }
@@ -28570,13 +28691,37 @@ ${USAGE}`);
       }
       return ok(command === "login" ? await login(site, deps.login) : logout(site));
     }
+    case "link": {
+      if (positionals.length > 0) return usage(`unexpected argument ${JSON.stringify(positionals[0])}
+${USAGE}`);
+      let site;
+      try {
+        site = resolveSite(values.site);
+      } catch (e) {
+        return usage(message4(e));
+      }
+      const { key, repoPath } = connected(values.repo);
+      if (!isSignedIn(site)) return fail(`not signed in to ${site}: run repobrain login --site ${site}`);
+      const remote = await (deps.connect ?? connectRemote)(site);
+      try {
+        return ok(await linkRepo(key, repoPath, site, remote, now));
+      } finally {
+        await remote.close().catch(() => {
+        });
+      }
+    }
+    case "unlink": {
+      if (positionals.length > 0) return usage(`unexpected argument ${JSON.stringify(positionals[0])}
+${USAGE}`);
+      return ok(unlinkRepo(connected(values.repo).key));
+    }
     case "connect": {
       const depth = count(values["area-depth"]);
       if (depth === null) return usage("--area-depth must be a positive integer");
-      return ok({ connected: connectRepo(path9.resolve(positionals[0] ?? values.repo ?? process.cwd()), depth) });
+      return ok({ connected: connectRepo(path10.resolve(positionals[0] ?? values.repo ?? process.cwd()), depth) });
     }
     case "capture": {
-      const dir = path9.resolve(values.repo ?? process.cwd());
+      const dir = path10.resolve(values.repo ?? process.cwd());
       let key = null;
       let capturing = false;
       try {

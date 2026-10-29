@@ -1,0 +1,179 @@
+import { beforeEach, describe, expect, it } from "vitest";
+import { FileOAuthProvider } from "../src/auth.js";
+import { main } from "../src/cli.js";
+import type { Card } from "../src/format.js";
+import { RemoteError, type Remote } from "../src/remote.js";
+import { acquireLock, connectRepo, loadConfig, readState, writeCard } from "../src/store.js";
+import { BATCH_SIZE, linkRepo, submitPending, toSubmitted, type SubmitCardsInput } from "../src/sync.js";
+import { commit, makeRepo, useTempHome } from "./helpers.js";
+
+const SITE = "http://localhost:3000";
+const MERGE_A = "a".repeat(40);
+const MERGE_B = "b".repeat(40);
+
+export interface FakeRemote extends Remote {
+  calls: { tool: string; args: Record<string, unknown> }[];
+}
+
+/** A Remote that records its calls; submit_cards accepts every card unless `reject` names it. */
+export function fakeRemote(opts: { reject?: Set<string>; fail?: (tool: string) => RemoteError | null } = {}): FakeRemote {
+  const calls: FakeRemote["calls"] = [];
+  return {
+    calls,
+    async call<T>(tool: string, args: Record<string, unknown>): Promise<T> {
+      calls.push({ tool, args: structuredClone(args) });
+      const failure = opts.fail?.(tool);
+      if (failure) throw failure;
+      if (tool === "link_repo") return { repoId: "repo-1", deckId: "deck-1", created: true } as T;
+      if (tool === "submit_cards") {
+        const ids = (args as unknown as SubmitCardsInput).cards.map((c) => c.id);
+        return {
+          accepted: ids.filter((id) => !opts.reject?.has(id)),
+          unchanged: [],
+          rejected: ids.filter((id) => opts.reject?.has(id)).map((id) => ({ id, reason: "looks like a secret" })),
+        } as T;
+      }
+      if (tool === "update_anchors") return { updated: (args.anchors as unknown[]).length } as T;
+      throw new RemoteError(`unknown tool ${tool}`, "tool");
+    },
+    close: async () => {},
+  };
+}
+
+function makeCard(key: string, id: string, over: Partial<Card> = {}): Card {
+  return {
+    id, repo: key, merge: MERGE_A, mergeTitle: "feat: referral codes", area: "src", createdAt: "2026-11-02T09:00:00.000Z", status: "draft", source: "merge",
+    anchor: { commit: MERGE_A, path: "src/ref.ts", symbol: "applyReferral", startLine: 1, endLine: 5, lines: 5, fingerprint: "f".repeat(16), status: "fresh" },
+    body: { kind: "flashcard", front: "What does applyReferral return for an unknown code?", back: "null" },
+    ...over,
+  };
+}
+
+const submits = (r: FakeRemote) => r.calls.filter((c) => c.tool === "submit_cards").map((c) => c.args as unknown as SubmitCardsInput);
+
+describe("toSubmitted", () => {
+  it("maps a card to the site's submittedCard shape, field for field", () => {
+    const mcq = makeCard("k", "c1", {
+      status: "kept",
+      body: { kind: "mcq", question: "Q?", choices: ["a", "b", "c", "d"], correctChoice: 2, explanation: "Because." },
+    });
+    expect(toSubmitted(mcq)).toEqual({
+      id: "c1", area: "src", status: "kept",
+      body: { kind: "mcq", question: "Q?", choices: ["a", "b", "c", "d"], correctChoice: 2, explanation: "Because." },
+      anchor: { commit: MERGE_A, path: "src/ref.ts", symbol: "applyReferral", startLine: 1, endLine: 5, fingerprint: "f".repeat(16), status: "fresh" },
+    });
+    expect(toSubmitted(makeCard("k", "c2")).body).toEqual({ kind: "flashcard", front: "What does applyReferral return for an unknown code?", back: "null" });
+  });
+});
+
+describe("link and submitPending", () => {
+  let repo: string;
+  let key: string;
+  beforeEach(() => {
+    useTempHome();
+    repo = makeRepo();
+    commit(repo, { "README.md": "demo\n" }, "first");
+    key = connectRepo(repo);
+  });
+
+  it("links the repo, stores the link, and uploads every card in batches of 20 per merge", async () => {
+    const total = BATCH_SIZE + 3;
+    for (let i = 0; i < total; i++) writeCard(key, makeCard(key, `a-${String(i).padStart(2, "0")}`, { status: i === 0 ? "kept" : i === 1 ? "dropped" : "draft" }));
+    writeCard(key, makeCard(key, "b-1", { merge: MERGE_B, mergeTitle: "fix: totals" }));
+    writeCard(key, makeCard(key, "base-1", { merge: MERGE_B, mergeTitle: "Baseline: Billing", source: "baseline" }));
+    const remote = fakeRemote();
+    const out = await linkRepo(key, repo, SITE, remote, () => new Date("2026-11-02T09:00:00Z"));
+    expect(out).toEqual({ repoId: "repo-1", deckId: "deck-1", uploaded: total + 2, rejected: [] });
+    expect(remote.calls[0]).toEqual({ tool: "link_repo", args: { key, name: repo.split("/").pop() } });
+    const batches = submits(remote);
+    expect(batches.map((b) => [b.merge, b.mergeTitle, b.source, b.cards.length])).toEqual([
+      [MERGE_A, "feat: referral codes", "merge", BATCH_SIZE],
+      [MERGE_A, "feat: referral codes", "merge", 3],
+      [MERGE_B, "fix: totals", "merge", 1],
+      [MERGE_B, "Baseline: Billing", "baseline", 1],
+    ]);
+    expect(batches.every((b) => b.repo === key)).toBe(true);
+    expect(batches[0].cards.slice(0, 2).map((c) => c.status)).toEqual(["kept", "dropped"]);
+    expect(loadConfig().repos[key].remote).toEqual({ site: SITE, repoId: "repo-1", deckId: "deck-1", linkedAt: "2026-11-02T09:00:00.000Z" });
+  });
+
+  it("reports rejected cards and doesn't mark them submitted, so they're sent again", async () => {
+    writeCard(key, makeCard(key, "ok-1"));
+    writeCard(key, makeCard(key, "bad-1"));
+    const remote = fakeRemote({ reject: new Set(["bad-1"]) });
+    const out = await linkRepo(key, repo, SITE, remote);
+    expect(out.uploaded).toBe(1);
+    expect(out.rejected).toEqual([{ id: "bad-1", reason: "looks like a secret" }]);
+    expect(readState(key).submitted).toEqual({ "ok-1": true });
+    const again = fakeRemote();
+    expect(await submitPending(key, again)).toEqual({ uploaded: 1, rejected: [] });
+    expect(submits(again).flatMap((b) => b.cards.map((c) => c.id))).toEqual(["bad-1"]);
+  });
+
+  it("sends nothing the second time", async () => {
+    writeCard(key, makeCard(key, "c1"));
+    await submitPending(key, fakeRemote());
+    const again = fakeRemote();
+    expect(await submitPending(key, again)).toEqual({ uploaded: 0, rejected: [] });
+    expect(again.calls).toEqual([]);
+  });
+
+  it("holds back a card the site's schema would refuse, rather than failing its batch", async () => {
+    writeCard(key, makeCard(key, "c1"));
+    writeCard(key, makeCard(key, "c2", { body: { kind: "mcq", question: "Q?", choices: ["a", "b", "c", "d"], correctChoice: 0, explanation: "" } }));
+    const remote = fakeRemote();
+    const out = await submitPending(key, remote);
+    expect(out).toEqual({ uploaded: 1, rejected: [{ id: "c2", reason: expect.stringMatching(/explanation/) }] });
+    expect(submits(remote).flatMap((b) => b.cards.map((c) => c.id))).toEqual(["c1"]);
+  });
+
+  it("keeps the batches that got through when a later one fails", async () => {
+    for (let i = 0; i < BATCH_SIZE + 1; i++) writeCard(key, makeCard(key, `c-${String(i).padStart(2, "0")}`));
+    let n = 0;
+    const remote = fakeRemote({ fail: (tool) => (tool === "submit_cards" && ++n === 2 ? new RemoteError("could not reach the site", "network") : null) });
+    await expect(submitPending(key, remote)).rejects.toMatchObject({ kind: "network" });
+    expect(Object.keys(readState(key).submitted ?? {})).toHaveLength(BATCH_SIZE);
+  });
+
+  it("is refused while a capture holds the repo's lock", async () => {
+    const lock = acquireLock(key)!;
+    try {
+      await expect(linkRepo(key, repo, SITE, fakeRemote())).rejects.toThrow(/busy/);
+    } finally {
+      lock.release();
+    }
+  });
+
+  describe("cli", () => {
+    const cli = (args: string[], connect = async () => fakeRemote() as Remote) => main([...args, "--repo", repo], { connect });
+
+    it("names repobrain login when the site has no sign-in", async () => {
+      const out = await cli(["link", "--site", SITE]);
+      expect(out).toEqual({ code: 1, out: { error: `not signed in to ${SITE}: run repobrain login --site ${SITE}` } });
+    });
+
+    it("names repobrain connect when the repo isn't connected", async () => {
+      const other = makeRepo();
+      const out = await main(["link", "--site", SITE, "--repo", other], { connect: async () => fakeRemote() });
+      expect(out.code).toBe(1);
+      expect((out.out as { error: string }).error).toMatch(/repobrain connect/);
+    });
+
+    it("links and unlinks", async () => {
+      new FileOAuthProvider(SITE).saveTokens({ access_token: "at-" + "x", token_type: "bearer", refresh_token: "rt-" + "x" });
+      writeCard(key, makeCard(key, "c1"));
+      expect(await cli(["link", "--site", SITE])).toEqual({ code: 0, out: { repoId: "repo-1", deckId: "deck-1", uploaded: 1, rejected: [] } });
+      expect(loadConfig().repos[key].remote?.site).toBe(SITE);
+      expect(await cli(["unlink"])).toEqual({ code: 0, out: { unlinked: SITE } });
+      expect(loadConfig().repos[key].remote).toBeUndefined();
+      expect(await cli(["unlink"])).toEqual({ code: 0, out: { unlinked: null } });
+    });
+
+    it("reports a site failure as an error", async () => {
+      new FileOAuthProvider(SITE).saveTokens({ access_token: "at-" + "x", token_type: "bearer" });
+      const out = await cli(["link", "--site", SITE], async () => fakeRemote({ fail: () => new RemoteError("could not reach the site", "network") }));
+      expect(out).toEqual({ code: 1, out: { error: "could not reach the site" } });
+      expect(loadConfig().repos[key].remote).toBeUndefined();
+    });
+  });
+});

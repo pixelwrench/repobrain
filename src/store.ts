@@ -5,9 +5,17 @@ import path from "node:path";
 import { parseCard, serializeCard, type Card } from "./format.js";
 import { repoRoots, type GitOptions } from "./git.js";
 
+/** The site a repo is linked to with `repobrain link`; once linked, the site holds its curation and reviews. */
+export interface RemoteLink {
+  site: string;
+  repoId: string;
+  deckId: string;
+  linkedAt: string;
+}
 export interface RepoConfig {
   path: string;
   areaDepth: number;
+  remote?: RemoteLink;
 }
 export interface Config {
   repos: Record<string, RepoConfig>;
@@ -26,6 +34,10 @@ export interface RepoState {
   unavailable?: { since: string; message: string };
   /** The last unexpected capture failure (a git error, say); a run that completes clears it. Week and stats show it. */
   lastError?: { at: string; message: string };
+  /** Ids of the cards the linked site has, so a failed upload is retried at the next capture. */
+  submitted?: Record<string, true>;
+  /** Set when the site refused the stored sign-in; the next successful upload clears it. */
+  remoteAuth?: "expired";
 }
 
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
@@ -107,6 +119,18 @@ export function connectRepo(dir: string, areaDepth = 3): string {
   writeJson(configPath(), config);
   fs.mkdirSync(path.join(repoDir(key), "cards"), { recursive: true });
   return key;
+}
+
+/** Saves, or with undefined removes, the repo's link to the site. Returns the link it replaced. */
+export function setRemote(key: string, remote: RemoteLink | undefined): RemoteLink | undefined {
+  const config = loadConfig();
+  const repo = config.repos[key];
+  if (!repo) throw new Error(`unknown repo ${key}; run repobrain connect first`);
+  const before = repo.remote;
+  if (remote) repo.remote = remote;
+  else delete repo.remote;
+  writeJson(configPath(), config);
+  return before;
 }
 
 /**
