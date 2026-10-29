@@ -15,3 +15,5 @@ Ask whether to draft cards for the last week now. If yes, say it can take a few 
 - `status: "failed"`: show the `error`. If it says claude is missing, logged out, offline or rate-limited, say capture will try again at the next session start.
 
 If the user says no, say that new merges from now on will be drafted automatically.
+
+Finally, if the user is new to this codebase, or it isn't theirs (a new job, an open-source project), offer `/codebrain:baseline`: it plans the codebase's areas in learning order and drafts cards about the code as it stands, one area at a time.

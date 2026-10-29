@@ -23,7 +23,7 @@ claude plugin marketplace add "$PWD"
 claude plugin install codebrain@codebrain-local
 ```
 
-Then open Claude Code in a repository you want cards for and run `/codebrain:connect`. It offers to draft cards for the last week's merges straight away.
+Then open Claude Code in a repository you want cards for and run `/codebrain:connect`. It offers to draft cards for the last week's merges straight away. For a codebase you're new to, `/codebrain:baseline` drafts cards about the code as it stands (see [Baseline](#baseline)).
 
 ## How capture works
 
@@ -37,6 +37,8 @@ Then open Claude Code in a repository you want cards for and run `/codebrain:con
    - a 3-minute timeout.
 
    It runs from an empty folder (`~/.codebrain/run`) with no settings files loaded, so no project settings, hooks or plugins apply. Claude Code still reads CLAUDE.md files from that folder's parents, so your user-level `~/.claude/CLAUDE.md`, a `~/CLAUDE.md`, and any CLAUDE.md above a custom `CODEBRAIN_HOME` may load. Model usage is billed to your own Claude account or plan. Claude checks the budget after its turn, so a single merge can go somewhat over it: with the defaults, expect a session start to spend up to about 5 merges × $0.50, around $2.50, but that is not a hard ceiling.
+
+   Each call's cost, as `claude` reports it (`total_cost_usd`), goes on that merge's line in `capture.log`, and `codebrain capture` prints the run's total as `costUsd`. When `claude` reports no cost, the log says "cost unknown" and the total leaves it out; CodeBrain never estimates one.
 5. **Checking the cards.** Claude returns up to 5 cards per merge, multiple choice or flashcard. A card is rejected if:
    - it contains a URL or anything that looks like a secret;
    - it is over 1,200 characters;
@@ -59,6 +61,16 @@ Then open Claude Code in a repository you want cards for and run `/codebrain:con
 - **History rewritten.** After a force-push, capture restarts from the common ancestor. If the commit it last saw shares no history with the branch, it starts again from the current head; merges in between never become cards.
 - **Already handled.** A card you have already kept or dropped is never overwritten by a retry. Only one capture runs per repository at a time.
 
+## Baseline
+
+Capture only sees new merges. If you're new to a codebase, `/codebrain:baseline` drafts cards about the code as it stands, in the order a newcomer would learn it. From then on, merges keep the deck current as usual.
+
+1. **Plan** (`codebrain baseline plan`). CodeBrain lists the text files at the head of the default branch with their line counts, leaving out the same paths capture leaves out of diffs (the excluded paths, `.codebrain/ignore`, and the sensitive file names under [Privacy and safety](#privacy-and-safety)). The list is capped at 3,000 paths, in git's order. It sends that list and the first 8,000 bytes of the root README (only if the secret filter finds nothing in it) to your own `claude -p`. Claude replies with up to 12 areas, each with a name, a one-line reason and up to 8 files from the list. Planning sends no other file contents. The plan is saved to `baseline.json`, and you can skip areas before anything is drafted.
+2. **Draft** (`codebrain baseline draft --next`, or an area's id). For one area, CodeBrain reads its files at the commit the plan was made at. It drops any file with a sensitive name or anything that looks like a secret, and skips files once the area would go over 60,000 bytes. The rest go to Claude with line numbers, as data. Claude writes up to 8 cards about where behaviour lives, how the parts fit together, why it's built this way, and what breaks if it changes. They are checked and anchored like merge cards, at the plan's commit, and written as drafts.
+3. **Curate and review as usual.** Baseline cards show up in `/codebrain:week` under "Baseline: <area name>". Every capture checks their anchors, so a merge that changes the code a baseline card describes flags it.
+
+**Pacing and cost.** Each area is one `claude -p` call, with the same flags, empty folder, budget and timeout as capture, and only when you ask, so you approve the spend area by area. The plan is one more call. Each call's reported cost goes to `capture.log` and the command's output, and `codebrain baseline status` sums the known costs. If Claude is unavailable the area stays planned; if the call fails, runs over budget or returns nothing usable, the area is marked failed and can be drafted again by id. A baseline and a capture never run at the same time. `plan --force` starts a new plan at the current head; cards already drafted stay, and a card you've kept or dropped is never overwritten.
+
 ## Options
 
 These are environment variables, read by the background capture. Set them in the environment you start Claude Code from.
@@ -79,6 +91,7 @@ In Claude Code:
 | Command | What it does |
 | --- | --- |
 | `/codebrain:connect` | Connects the current repository and offers to draft cards for the last week's merges. |
+| `/codebrain:baseline` | Plans the codebase's areas in learning order, lets you skip some, and drafts the next area's cards in the background. |
 | `/codebrain:week` | Goes through draft cards, and kept cards whose code changed or was removed, change by change: keep, fix or drop each one. |
 | `/codebrain:review` | Quizzes you on due cards one at a time and records each answer. |
 
@@ -88,15 +101,19 @@ The plugin puts the `codebrain` CLI on the PATH of Claude Code's Bash tool. Outs
 | --- | --- |
 | `connect [path] [--area-depth N]` | Connects a repository. Cards are grouped into areas by their first N folders (default 3). |
 | `capture [--since DATE] [--max N] [--no-fetch]` | Drafts cards from new merges now. `--since` (git date syntax) applies on the first run, `--max` defaults to 5, and `--no-fetch` skips `git fetch`. |
-| `week` | Lists draft and flagged cards by area and merge, plus unreadable card files and capture problems. |
+| `week` | Lists draft and flagged cards by area and change (a merge, or a baseline area), plus unreadable card files and capture problems. |
 | `curate <id> keep\|fix\|drop` | Records a decision. Keeping or fixing a changed card re-anchors it at the default branch's head. |
 | `curate <id> fix --path P --lines S-E [--symbol X\|--no-symbol]` | Re-points a card at other code on the default branch. |
 | `show <id>` | Shows the card's code as it was written against it, next to the code at the default branch's head. |
 | `due [--limit N]` | Lists the questions for due cards, without answers (default limit 10). |
 | `answer <id>` | Shows a kept card's answer. |
 | `grade <id> right\|wrong\|didnt-know` | Records a review and schedules the card. Right counts as Good; the others count as Again. |
-| `stats` | Counts cards by status, curation decisions and reviews. |
+| `stats` | Counts cards by status, curation decisions and reviews, overall and by source (`bySource`: merge or baseline). |
 | `card <id>` | Prints the path of a card's file. |
+| `baseline plan [--force] [--no-fetch]` | Plans the baseline's areas, or prints the existing plan. `--force` re-plans at the current head. |
+| `baseline draft <area-id>\|--next` | Drafts one area's cards: a named planned or failed area, or the first planned one. |
+| `baseline status` | Shows the plan, each area's status, totals and the total known cost. |
+| `baseline skip <area-id>`, `baseline unskip <area-id>` | Skips a planned or failed area, or puts a skipped one back. |
 
 ## Files
 
@@ -111,7 +128,8 @@ The plugin puts the `codebrain` CLI on the PATH of Claude Code's Bash tool. Outs
     schedule.json       FSRS state per card
     reviews.jsonl       every grade
     curation.jsonl      every keep, fix and drop
-    capture.log         what each capture did
+    baseline.json       the baseline plan: its commit, and each area's files, status, card count and cost
+    capture.log         what each capture and baseline call did, with its cost
     capture.lock        held while a capture runs
 ```
 
@@ -128,6 +146,7 @@ merge_title: "Retry webhook deliveries with backoff"
 area: "src/webhooks"
 created_at: "2026-10-28T09:12:44.000Z"
 status: "draft"
+source: "merge"
 anchor_commit: "4be1c09f2a7d3e5b8c6a1f0e9d2b7c4a5e6f8a91"
 anchor_path: "src/webhooks/deliver.ts"
 anchor_symbol: "nextDelay"
@@ -147,11 +166,11 @@ Correct: A
 Explanation: Without jitter, deliveries that failed together retry together and can overload the receiver again. Message size, timer rounding and ordering are unrelated to the delay.
 ```
 
-A flashcard uses `Front:` and `Back:` instead.
+A flashcard uses `Front:` and `Back:` instead. `source` is `merge` or `baseline`; a card file without it is a merge card. A baseline card's `merge` holds the baseline commit and its `merge_title` is `Baseline: <area name>`.
 
 ## Privacy and safety
 
-- **What is sent, and where.** For each merge: a fixed prompt, the merge's title (one line, up to 200 characters) and its filtered diff. They go to your `claude` CLI, which sends them to Anthropic or to the provider it is configured for. CodeBrain sends nothing anywhere else. The only other network call it makes is `git fetch origin`.
+- **What is sent, and where.** For each merge: a fixed prompt, the merge's title (one line, up to 200 characters) and its filtered diff. For a baseline plan: the file list with line counts and the README excerpt; for each baseline area: its filtered files (see [Baseline](#baseline)). They go to your `claude` CLI, which sends them to Anthropic or to the provider it is configured for. CodeBrain sends nothing anywhere else. The only other network call it makes is `git fetch origin`.
 - **What is filtered first.**
   - Excluded paths (above) and `.codebrain/ignore`.
   - Whole files with sensitive names: `.env*`, `.npmrc`, `.netrc`, `.pypirc`, `.pgpass`, `credentials.json`, `service-account*.json`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.p8`, `*.jks`, `*.keystore`, `*.tfstate`, `id_rsa*`, `id_ed25519*` and `id_ecdsa*`.

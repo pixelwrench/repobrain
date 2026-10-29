@@ -14,7 +14,7 @@ Report problems first:
 
 If `drafts` and `flagged` are both 0, say so in one line and stop.
 
-Otherwise go area by area (the keys of `areas`), change by change (each group's `title`). For each change, give one or two sentences on what it did, from its title and cards. Then show its cards one at a time: for multiple choice (`body.kind: "mcq"`) the question, choices A-D with `body.correct` marked, and the explanation; for a flashcard the front and back. Ask: keep, fix or drop?
+Otherwise go area by area (the keys of `areas`), change by change (each group's `title`). For each change, give one or two sentences on what it did, from its title and cards. A group with `source: "baseline"`, titled "Baseline: <area name>", holds baseline cards about the codebase as it stood rather than a change: say what that part of the code does instead. Curate them the same way. Then show its cards one at a time: for multiple choice (`body.kind: "mcq"`) the question, choices A-D with `body.correct` marked, and the explanation; for a flashcard the front and back. Ask: keep, fix or drop?
 - keep: `codebrain curate <id> keep`
 - drop: `codebrain curate <id> drop`
 - fix: ask what to change, unless the user already said. Get the file with `codebrain card <id>`, Read it, and Edit only the labelled lines after the front matter (`Q:`, `A:`-`D:`, `Correct:` as one letter, `Explanation:`, or `Front:`, `Back:`). Never edit the front matter. Keep each label's text on one line; a wrapped line must never start with a label such as `A:`. Then run `codebrain curate <id> fix`.

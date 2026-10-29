@@ -1,6 +1,6 @@
 {
   "name": "codebrain",
   "description": "Remember the code your AI agents write: after each merge, your own Claude drafts a few review cards; keep, fix or drop them weekly and quiz yourself with spaced repetition.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": { "name": "pixelwrench" }
 }
