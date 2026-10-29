@@ -33,7 +33,7 @@ export class ClaudeResultError extends Error {
   }
 }
 
-/** claude hit one of CodeBrain's limits: the timeout or the output cap. */
+/** claude hit one of RepoBrain's limits: the timeout or the output cap. */
 export class ClaudeLimitError extends Error {}
 
 /** claude couldn't run properly: not installed, logged out, offline, killed, or no result at all. Not the merge's fault. */
@@ -85,7 +85,7 @@ export function buildPrompt(): string {
 }
 
 function budget(): string {
-  const raw = process.env.CODEBRAIN_MAX_BUDGET_USD;
+  const raw = process.env.REPOBRAIN_MAX_BUDGET_USD;
   if (raw === undefined || raw.trim() === "") return DEFAULT_BUDGET_USD;
   const n = Number(raw);
   return Number.isFinite(n) && n > 0 ? String(n) : DEFAULT_BUDGET_USD;
@@ -93,12 +93,12 @@ function budget(): string {
 
 /**
  * No settings files by default, so no user or project hooks, plugins or env run in the child.
- * CODEBRAIN_SETTING_SOURCES=user opts back into user settings, for users whose auth lives in
+ * REPOBRAIN_SETTING_SOURCES=user opts back into user settings, for users whose auth lives in
  * ~/.claude/settings.json. Nothing else is allowed, so a repo's project or local settings
  * (and their hooks) can never run.
  */
 function settingSources(): string {
-  return process.env.CODEBRAIN_SETTING_SOURCES === "user" ? "user" : "";
+  return process.env.REPOBRAIN_SETTING_SOURCES === "user" ? "user" : "";
 }
 
 export function claudeArgs(prompt: string): string[] {
@@ -117,9 +117,9 @@ export function claudeArgs(prompt: string): string[] {
   ];
 }
 
-/** CODEBRAIN_MODEL, when set, picks the model (`--model`); otherwise claude's default is used. */
+/** REPOBRAIN_MODEL, when set, picks the model (`--model`); otherwise claude's default is used. */
 function model(): string[] {
-  const m = process.env.CODEBRAIN_MODEL?.trim();
+  const m = process.env.REPOBRAIN_MODEL?.trim();
   return m ? ["--model", m] : [];
 }
 
@@ -134,7 +134,7 @@ function childEnv(): NodeJS.ProcessEnv {
     if (k.startsWith("CLAUDE_CODE_") && !KEEP_CLAUDE_CODE.test(k)) continue;
     env[k] = v;
   }
-  env.CODEBRAIN_CAPTURE = "1";
+  env.REPOBRAIN_CAPTURE = "1";
   return env;
 }
 
@@ -153,7 +153,7 @@ const costOf = (res: ResultJson): number | null =>
 /** API statuses that say nothing about the request: auth (401, 403) and rate or usage limits (429). 5xx and no status join them. */
 const ENV_STATUSES = new Set([401, 403, 429]);
 
-const AUTH_HINT = " (if your Claude auth is set in settings.json, set CODEBRAIN_SETTING_SOURCES=user)";
+const AUTH_HINT = " (if your Claude auth is set in settings.json, set REPOBRAIN_SETTING_SOURCES=user)";
 
 /** claude's result object from its --output-format json stdout, or null when there is none. */
 function resultJson(out: string): ResultJson | null {
@@ -197,7 +197,7 @@ function resultText(res: ResultJson, out: string): string {
 /**
  * Runs the user's own `claude` with no tools or MCP servers, from an empty
  * directory: no project CLAUDE.md, settings, hooks or memory (a user-level
- * ~/.claude/CLAUDE.md may still load). CODEBRAIN_CAPTURE=1 makes
+ * ~/.claude/CLAUDE.md may still load). REPOBRAIN_CAPTURE=1 makes
  * the plugin's SessionStart hook in that child session exit immediately.
  * The child leads its own process group, so a timeout kills any grandchildren too.
  */

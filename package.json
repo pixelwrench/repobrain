@@ -1,11 +1,11 @@
 {
-  "name": "codebrain",
-  "version": "0.1.0",
+  "name": "repobrain",
+  "version": "0.3.0",
   "description": "Remember the code your AI agents write: spaced-repetition cards from merged changes, drafted by your own Claude.",
   "license": "MIT",
   "type": "module",
   "bin": {
-    "codebrain": "dist/bin.js"
+    "repobrain": "dist/bin.js"
   },
   "files": [
     "dist",
@@ -22,15 +22,17 @@
     "node": ">=24"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc --noEmit -p tsconfig.build.json && rm -rf dist && esbuild src/bin.ts src/hook-bin.ts --bundle --platform=node --format=esm --target=node24 --outdir=dist --log-level=warning",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "check:dist": "npm run build && git diff --exit-code --stat -- dist"
   },
   "dependencies": {
     "ts-fsrs": "6.0.0"
   },
   "devDependencies": {
     "@types/node": "^24.19.2",
+    "esbuild": "0.28.2",
     "typescript": "^7.0.2",
     "vitest": "^5.0.5"
   }

@@ -53,7 +53,7 @@ describe("baseline", () => {
       repo,
       {
         "README.md": "# Demo\n\nA referral service.\n", "src/ref.ts": FILE, "src/server.ts": SERVER, "package-lock.json": "{}\n",
-        "dist/app.js": "x\n", ".env": "A=1\n", "secrets/notes.txt": "private\n", "logo.png": "\u0000\u0001\u0002", ".codebrain/ignore": "secrets/**\n",
+        "dist/app.js": "x\n", ".env": "A=1\n", "secrets/notes.txt": "private\n", "logo.png": "\u0000\u0001\u0002", ".repobrain/ignore": "secrets/**\n",
       },
       "first",
     );
@@ -271,7 +271,7 @@ describe("baseline", () => {
 
     it("re-applies the exclusions at draft time, so a path ignored after planning isn't sent", async () => {
       await planned();
-      fs.writeFileSync(path.join(repo, ".codebrain", "ignore"), "secrets/**\nsrc/server.ts\n");
+      fs.writeFileSync(path.join(repo, ".repobrain", "ignore"), "secrets/**\nsrc/server.ts\n");
       let stdin = "";
       const out = await draft({ areaId: "a02-referrals" }, async (_p, s) => ((stdin = s), reply([card("src/ref.ts")])));
       expect(out.dropped).toEqual([{ path: "src/server.ts", reason: "excluded" }]);
@@ -323,7 +323,7 @@ describe("baseline", () => {
     });
 
     it("refuses without a plan, for unknown, drafted or skipped areas, and while locked; --next with nothing left is a note", async () => {
-      await expect(draft({ next: true }, async () => reply([]))).rejects.toThrow(/run codebrain baseline plan first/);
+      await expect(draft({ next: true }, async () => reply([]))).rejects.toThrow(/run repobrain baseline plan first/);
       await planned();
       await expect(draft({ areaId: "a09-nope" }, async () => reply([]))).rejects.toThrow(/no area a09-nope/);
       await setAreaSkipped(key, "a02-referrals", true);

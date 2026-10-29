@@ -29,7 +29,7 @@ function treesOf(repoPath: string): string[] {
   return trees;
 }
 
-/** `<CODEBRAIN_HOME>/capture-errors.log` opened for append, or null when it can't be. */
+/** `<REPOBRAIN_HOME>/capture-errors.log` opened for append, or null when it can't be. */
 function openErrorLog(): number | null {
   try {
     fs.mkdirSync(home(), { recursive: true });
@@ -42,15 +42,15 @@ function openErrorLog(): number | null {
 const isWithin = (dir: string, root: string) => dir === root || dir.startsWith(root.endsWith(path.sep) ? root : root + path.sep);
 
 /**
- * Starts `codebrain capture` in the background for a connected repo and returns at once.
+ * Starts `repobrain capture` in the background for a connected repo and returns at once.
  * It reads the config first and calls git only when `cwd` is inside a connected repo or one of
  * its worktrees, with a timeout, so sessions elsewhere cost a file read and never write logs.
- * CODEBRAIN_CAPTURE stops the capture's own `claude -p` session from starting another capture.
+ * REPOBRAIN_CAPTURE stops the capture's own `claude -p` session from starting another capture.
  * Never throws: a hook must not break the session.
  */
 export function startCapture(cwd: string, bin = defaultBin): boolean {
   try {
-    if (process.env.CODEBRAIN_CAPTURE) return false;
+    if (process.env.REPOBRAIN_CAPTURE) return false;
     const config = loadConfig();
     const repos = Object.values(config.repos);
     if (repos.length === 0) return false;
@@ -59,7 +59,7 @@ export function startCapture(cwd: string, bin = defaultBin): boolean {
     const found = findRepo(real, { timeoutMs: GIT_TIMEOUT_MS }, config);
     if (!found) return false;
     if (!fs.existsSync(bin)) {
-      appendLog(found.key, `codebrain bin missing at ${bin}; rebuild or reinstall`);
+      appendLog(found.key, `repobrain bin missing at ${bin}; rebuild or reinstall`);
       return false;
     }
     // The child's stderr goes to capture-errors.log, so a capture that dies before it can log
@@ -69,7 +69,7 @@ export function startCapture(cwd: string, bin = defaultBin): boolean {
       const child = spawn(process.execPath, [bin, "capture", "--repo", found.config.path], {
         detached: true,
         stdio: ["ignore", "ignore", errFd ?? "ignore"],
-        env: { ...process.env, CODEBRAIN_CAPTURE: "1" },
+        env: { ...process.env, REPOBRAIN_CAPTURE: "1" },
       });
       child.on("error", () => {}); // a failed spawn is emitted async; don't let it crash the hook
       child.unref();

@@ -56,7 +56,7 @@ describe("git helpers", () => {
   it("prefers the remote default branch", () => {
     const repo = makeRepo();
     commit(repo, { "a.txt": "a\n" }, "first");
-    const bare = tempDir("codebrain-bare-");
+    const bare = tempDir("repobrain-bare-");
     sh(bare, ["init", "-q", "--bare"]);
     sh(repo, ["remote", "add", "origin", bare]);
     sh(repo, ["push", "-q", "origin", "master"]);
@@ -128,9 +128,9 @@ describe("git helpers", () => {
     expect(process.env.GIT_CONFIG_NOSYSTEM).toBe("1");
   });
 
-  it("keeps tests away from the real CodeBrain home and the real claude", () => {
-    expect(process.env.CODEBRAIN_HOME).toBeTruthy();
-    expect(process.env.CODEBRAIN_HOME!.startsWith(os.tmpdir())).toBe(true);
+  it("keeps tests away from the real RepoBrain home and the real claude", () => {
+    expect(process.env.REPOBRAIN_HOME).toBeTruthy();
+    expect(process.env.REPOBRAIN_HOME!.startsWith(os.tmpdir())).toBe(true);
     const r = spawnSync("claude", ["--version"], { encoding: "utf8" });
     expect(r.status).toBe(97);
     expect(r.stderr).toContain("the real claude must never run in tests");
@@ -139,7 +139,7 @@ describe("git helpers", () => {
   it("returns false when fetching from a dead remote", () => {
     const repo = makeRepo();
     commit(repo, { "a.txt": "a\n" }, "first");
-    sh(repo, ["remote", "add", "origin", path.join(tempDir("codebrain-gone-"), "missing")]);
+    sh(repo, ["remote", "add", "origin", path.join(tempDir("repobrain-gone-"), "missing")]);
     expect(fetchQuietly(repo)).toBe(false);
   });
 
@@ -152,7 +152,7 @@ describe("git helpers", () => {
       repo = makeRepo();
       commit(repo, { "a.txt": "a\n" }, "first");
       sh(repo, ["remote", "add", "origin", "ssh://git@example.invalid/x.git"]);
-      stub = tempDir("codebrain-ssh-");
+      stub = tempDir("repobrain-ssh-");
       record = path.join(stub, "calls");
       for (const name of ["ssh", "myssh"]) {
         fs.writeFileSync(path.join(stub, name), `#!/bin/sh\necho "${name} $*" >> ${JSON.stringify(record)}\nexit 255\n`, { mode: 0o755 });
@@ -203,7 +203,7 @@ describe("git helpers", () => {
     const repo = makeRepo();
     commit(repo, { "a.txt": "a\n" }, "first");
     sh(repo, ["branch", "-m", "main"]);
-    const bare = tempDir("codebrain-bare-");
+    const bare = tempDir("repobrain-bare-");
     sh(bare, ["init", "-q", "--bare", "-b", "main"]);
     sh(repo, ["remote", "add", "origin", bare]);
     sh(repo, ["push", "-q", "origin", "main"]);
@@ -216,7 +216,7 @@ describe("git helpers", () => {
     const repo = makeRepo();
     commit(repo, { "a.txt": "a\n" }, "first");
     sh(repo, ["branch", "-m", "main"]);
-    const bare = tempDir("codebrain-bare-");
+    const bare = tempDir("repobrain-bare-");
     sh(bare, ["init", "-q", "--bare", "-b", "main"]);
     sh(repo, ["remote", "add", "origin", bare]);
     sh(repo, ["push", "-q", "origin", "main"]);
@@ -228,7 +228,7 @@ describe("git helpers", () => {
     const repo = makeRepo();
     commit(repo, { "a.txt": "a\n" }, "first");
     commit(repo, { "b.txt": "b\n" }, "second");
-    const clone = path.join(tempDir("codebrain-clone-"), "c");
+    const clone = path.join(tempDir("repobrain-clone-"), "c");
     sh(repo, ["clone", "-q", "--depth", "1", `file://${repo}`, clone]);
     expect(commitDiff(clone, resolveCommit(clone, "HEAD")!, [])).toBeNull();
   });
@@ -307,7 +307,7 @@ describe("git helpers", () => {
     const repo = makeRepo();
     commit(repo, { "src/a.txt": "a\n" }, "first");
     expect(toplevel(path.join(repo, "src"))).toBe(repo);
-    const outside = tempDir("codebrain-plain-");
+    const outside = tempDir("repobrain-plain-");
     fs.mkdirSync(path.join(outside, "x"));
     expect(toplevel(path.join(outside, "x"))).toBeNull();
   });
@@ -319,9 +319,9 @@ describe("git helpers", () => {
     const inside = path.join(repo, ".worktrees", "feat");
     sh(repo, ["worktree", "add", "-q", "-b", "feat", inside]);
     expect(repoRoots(path.join(inside, "src"))).toEqual({ top: inside, main: repo });
-    const elsewhere = path.join(tempDir("codebrain-wt-"), "other");
+    const elsewhere = path.join(tempDir("repobrain-wt-"), "other");
     sh(repo, ["worktree", "add", "-q", "-b", "other", elsewhere]);
     expect(repoRoots(elsewhere)).toEqual({ top: elsewhere, main: repo });
-    expect(repoRoots(tempDir("codebrain-plain-"))).toBeNull();
+    expect(repoRoots(tempDir("repobrain-plain-"))).toBeNull();
   });
 });

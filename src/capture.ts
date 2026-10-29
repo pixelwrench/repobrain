@@ -84,7 +84,7 @@ function recordError(key: string, msg: string, at: Date): void {
 
 async function capture(key: string, opts: CaptureOptions): Promise<CaptureReport> {
   const repo = loadConfig().repos[key];
-  if (!repo) throw new Error(`unknown repo ${key}; run codebrain connect first`);
+  if (!repo) throw new Error(`unknown repo ${key}; run repobrain connect first`);
   const report: CaptureReport = { status: "done", processed: 0, cardsWritten: 0, skipped: 0, anchorsUpdated: 0, costUsd: null };
   const lock = acquireLock(key);
   if (!lock) return { ...report, status: "locked" };
@@ -222,7 +222,7 @@ async function captureMerges(
       const msg = `git: ${message(e)}`;
       if (PATHSPEC_ERROR.test(message(e))) {
         // Not this merge's fault: striking would skip every merge in turn, so stop and keep the error visible.
-        appendLog(key, `${commit.sha} not drafted, git rejected a pathspec (check .codebrain/ignore): ${msg}`);
+        appendLog(key, `${commit.sha} not drafted, git rejected a pathspec (check .repobrain/ignore): ${msg}`);
         return fail(msg);
       }
       state.lastError = { at: now().toISOString(), message: msg.slice(0, 500) };

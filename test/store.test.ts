@@ -52,14 +52,14 @@ describe("store", () => {
     const key = connectRepo(repo);
     const inside = path.join(repo, ".worktrees", "feat");
     sh(repo, ["worktree", "add", "-q", "-b", "feat", inside]);
-    const elsewhere = path.join(tempDir("codebrain-wt-"), "other");
+    const elsewhere = path.join(tempDir("repobrain-wt-"), "other");
     sh(repo, ["worktree", "add", "-q", "-b", "other", elsewhere]);
     expect(findRepo(inside)).toEqual({ key, config: { path: repo, areaDepth: 3 } });
     expect(findRepo(elsewhere)?.key).toBe(key);
   });
 
   it("connects the main repo when run from a linked worktree", () => {
-    const wt = path.join(tempDir("codebrain-wt-"), "feat");
+    const wt = path.join(tempDir("repobrain-wt-"), "feat");
     sh(repo, ["worktree", "add", "-q", "-b", "feat", wt]);
     const key = connectRepo(path.join(wt, "src"));
     expect(key).toBe(connectRepo(repo));

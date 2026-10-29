@@ -34,14 +34,14 @@ const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 export const isSafeId = (id: string): boolean => SAFE_ID.test(id);
 
 function checkId(kind: string, id: string): string {
-  if (!SAFE_ID.test(id)) throw new Error(`codebrain: invalid ${kind} ${JSON.stringify(id)}`);
+  if (!SAFE_ID.test(id)) throw new Error(`repobrain: invalid ${kind} ${JSON.stringify(id)}`);
   return id;
 }
 
 const isEnoent = (e: unknown): boolean => (e as NodeJS.ErrnoException).code === "ENOENT";
 
 export function home(): string {
-  return process.env.CODEBRAIN_HOME ?? path.join(os.homedir(), ".codebrain");
+  return process.env.REPOBRAIN_HOME ?? path.join(os.homedir(), ".repobrain");
 }
 const configPath = (): string => path.join(home(), "config.json");
 export const repoDir = (key: string): string => path.join(home(), "repos", checkId("repo key", key));
@@ -58,7 +58,7 @@ export function readJson<T>(file: string, fallback: T): T {
   try {
     return JSON.parse(text) as T;
   } catch {
-    throw new Error(`codebrain: ${file} is not valid JSON; fix or delete it`);
+    throw new Error(`repobrain: ${file} is not valid JSON; fix or delete it`);
   }
 }
 
@@ -85,7 +85,7 @@ export function loadConfig(): Config {
   const file = configPath();
   const raw = readJson<unknown>(file, {});
   if (!isObject(raw) || (raw.repos !== undefined && !isObject(raw.repos))) {
-    throw new Error(`codebrain: ${file} is not a valid config; fix or delete it`);
+    throw new Error(`repobrain: ${file} is not a valid config; fix or delete it`);
   }
   return { ...raw, repos: (raw.repos ?? {}) as Record<string, RepoConfig> };
 }
@@ -140,7 +140,7 @@ export function writeCard(key: string, card: Card): void {
 
 export function readCard(key: string, id: string): Card {
   const card = parseCard(fs.readFileSync(cardPath(key, id), "utf8"));
-  if (card.id !== id) throw new Error(`codebrain: card file ${id}.md holds card ${JSON.stringify(card.id)}`);
+  if (card.id !== id) throw new Error(`repobrain: card file ${id}.md holds card ${JSON.stringify(card.id)}`);
   return card;
 }
 
@@ -186,7 +186,7 @@ export function listCardsReport(key: string): CardListing {
 /** The readable cards; each unreadable file is skipped with a warning on stderr. */
 export function listCards(key: string): Card[] {
   const { cards, unreadable } = listCardsReport(key);
-  for (const u of unreadable) console.error(`codebrain: skipping ${path.basename(u.file)}: ${u.error}`);
+  for (const u of unreadable) console.error(`repobrain: skipping ${path.basename(u.file)}: ${u.error}`);
   return cards;
 }
 

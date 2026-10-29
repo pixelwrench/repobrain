@@ -195,7 +195,7 @@ export function validateCard(body: CardBody): string[] {
 
 /**
  * Spreads correct answers evenly across A-D within a batch. LLM-written
- * multiple-choice questions cluster on one letter (braineos-issues#91).
+ * multiple-choice questions cluster on one letter.
  */
 export function rebalanceAnswers<T extends { body: CardBody }>(cards: T[], seed: number): T[] {
   let n = 0;

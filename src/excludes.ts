@@ -1,19 +1,19 @@
 /**
  * What is never sent to the model, shared by capture's diffs and the baseline's file list:
- * the default exclusions plus `.codebrain/ignore`, as git glob pathspecs.
+ * the default exclusions plus `.repobrain/ignore`, as git glob pathspecs.
  */
 import fs from "node:fs";
 import path from "node:path";
 import { git } from "./git.js";
 
-/** Glob pathspecs never sent to the model. `.codebrain/ignore` in the repo adds more, one per line. */
+/** Glob pathspecs never sent to the model. `.repobrain/ignore` in the repo adds more, one per line. */
 export const DEFAULT_EXCLUDES = [
   "**/package-lock.json", "**/pnpm-lock.yaml", "**/yarn.lock", "**/*.lock", "**/*.min.js", "**/*.map",
   "**/*.snap", "**/dist/**", "**/build/**", "**/vendor/**", "**/node_modules/**", "**/.env*", "**/*.pem", "**/*.key",
 ];
 
 /**
- * `.codebrain/ignore` as git pathspec globs. A leading `/` (gitignore's "from the root") is
+ * `.repobrain/ignore` as git pathspec globs. A leading `/` (gitignore's "from the root") is
  * stripped, since pathspecs are already relative to the root. Lines git would reject or read as
  * something else are dropped, each reported through `drop`: `!` negation, `:` pathspec magic,
  * any `..` segment, and anything else git refuses as an exclude pathspec (checked once per run).
@@ -21,7 +21,7 @@ export const DEFAULT_EXCLUDES = [
 function readIgnore(repoPath: string, drop: (line: string, why: string) => void): string[] {
   let text: string;
   try {
-    text = fs.readFileSync(path.join(repoPath, ".codebrain", "ignore"), "utf8");
+    text = fs.readFileSync(path.join(repoPath, ".repobrain", "ignore"), "utf8");
   } catch {
     return [];
   }
@@ -48,7 +48,7 @@ function readIgnore(repoPath: string, drop: (line: string, why: string) => void)
 }
 
 /** Paired with an exclude so ls-files has a positive pathspec that matches nothing, and prints nothing. */
-const NO_MATCH = ":(literal).codebrain/no-such-file-pathspec-check";
+const NO_MATCH = ":(literal).repobrain/no-such-file-pathspec-check";
 
 /** Why git rejects `glob` as an exclude pathspec, or null when it takes it. */
 function pathspecProblem(repoPath: string, glob: string): string | null {
@@ -64,7 +64,7 @@ function pathspecProblem(repoPath: string, glob: string): string | null {
 
 const message = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
-/** The default exclusions plus the repo's `.codebrain/ignore` lines; each line dropped is reported through `drop`. */
+/** The default exclusions plus the repo's `.repobrain/ignore` lines; each line dropped is reported through `drop`. */
 export function repoExcludes(repoPath: string, drop: (line: string, why: string) => void): string[] {
   return [...DEFAULT_EXCLUDES, ...readIgnore(repoPath, drop)];
 }

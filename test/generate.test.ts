@@ -127,56 +127,56 @@ describe("prompt and CLI arguments", () => {
     expect(args).not.toContain("--bare");
   });
 
-  it("passes CODEBRAIN_MODEL as --model only when it is set", () => {
-    const old = process.env.CODEBRAIN_MODEL;
+  it("passes REPOBRAIN_MODEL as --model only when it is set", () => {
+    const old = process.env.REPOBRAIN_MODEL;
     try {
-      delete process.env.CODEBRAIN_MODEL;
+      delete process.env.REPOBRAIN_MODEL;
       expect(claudeArgs("p")).not.toContain("--model");
-      process.env.CODEBRAIN_MODEL = "  ";
+      process.env.REPOBRAIN_MODEL = "  ";
       expect(claudeArgs("p")).not.toContain("--model");
-      process.env.CODEBRAIN_MODEL = "sonnet";
+      process.env.REPOBRAIN_MODEL = "sonnet";
       const args = claudeArgs("p");
       expect(args[args.indexOf("--model") + 1]).toBe("sonnet");
     } finally {
-      if (old === undefined) delete process.env.CODEBRAIN_MODEL;
-      else process.env.CODEBRAIN_MODEL = old;
+      if (old === undefined) delete process.env.REPOBRAIN_MODEL;
+      else process.env.REPOBRAIN_MODEL = old;
     }
   });
 
-  it("allows CODEBRAIN_SETTING_SOURCES only as user, defaulting to none", () => {
-    const old = process.env.CODEBRAIN_SETTING_SOURCES;
+  it("allows REPOBRAIN_SETTING_SOURCES only as user, defaulting to none", () => {
+    const old = process.env.REPOBRAIN_SETTING_SOURCES;
     try {
       const sources = () => {
         const args = claudeArgs("p");
         return args[args.indexOf("--setting-sources") + 1];
       };
-      delete process.env.CODEBRAIN_SETTING_SOURCES;
+      delete process.env.REPOBRAIN_SETTING_SOURCES;
       expect(sources()).toBe("");
-      process.env.CODEBRAIN_SETTING_SOURCES = "user";
+      process.env.REPOBRAIN_SETTING_SOURCES = "user";
       expect(sources()).toBe("user");
       for (const v of ["project", "local", "user,project", "user,local", " user"]) {
-        process.env.CODEBRAIN_SETTING_SOURCES = v;
+        process.env.REPOBRAIN_SETTING_SOURCES = v;
         expect(sources()).toBe("");
       }
     } finally {
-      if (old === undefined) delete process.env.CODEBRAIN_SETTING_SOURCES;
-      else process.env.CODEBRAIN_SETTING_SOURCES = old;
+      if (old === undefined) delete process.env.REPOBRAIN_SETTING_SOURCES;
+      else process.env.REPOBRAIN_SETTING_SOURCES = old;
     }
   });
 
   it("accepts only a positive budget from the environment", () => {
-    const old = process.env.CODEBRAIN_MAX_BUDGET_USD;
+    const old = process.env.REPOBRAIN_MAX_BUDGET_USD;
     try {
       const budget = (v: string) => {
-        process.env.CODEBRAIN_MAX_BUDGET_USD = v;
+        process.env.REPOBRAIN_MAX_BUDGET_USD = v;
         const args = claudeArgs("p");
         return args[args.indexOf("--max-budget-usd") + 1];
       };
       expect(budget("1.25")).toBe("1.25");
       for (const v of ["0", "-1", "abc", "", "Infinity"]) expect(budget(v)).toBe("0.50");
     } finally {
-      if (old === undefined) delete process.env.CODEBRAIN_MAX_BUDGET_USD;
-      else process.env.CODEBRAIN_MAX_BUDGET_USD = old;
+      if (old === undefined) delete process.env.REPOBRAIN_MAX_BUDGET_USD;
+      else process.env.REPOBRAIN_MAX_BUDGET_USD = old;
     }
   });
 });
@@ -226,7 +226,7 @@ describe("runClaude with a fake claude", () => {
 
   beforeEach(() => {
     oldPath = process.env.PATH;
-    bin = tempDir("codebrain-bin-");
+    bin = tempDir("repobrain-bin-");
     process.env.PATH = `${bin}${path.delimiter}${oldPath}`;
     home = useTempHome();
   });
@@ -238,7 +238,7 @@ describe("runClaude with a fake claude", () => {
   const ok = (result: string) => `{"type":"result","subtype":"success","is_error":false,"result":"${result}"}`;
 
   it("returns the result from a neutral cwd with a cleaned environment", async () => {
-    fake(`cat >/dev/null; printf '${ok("%s|%s|%s|%s|%s|%s")}' "$PWD" "$CODEBRAIN_CAPTURE" "\${CLAUDECODE:-unset}" "\${CLAUDE_CODE_ENTRYPOINT:-unset}" "\${CLAUDE_CODE_OAUTH_TOKEN:-unset}" "\${CLAUDE_EFFORT:-unset}"`);
+    fake(`cat >/dev/null; printf '${ok("%s|%s|%s|%s|%s|%s")}' "$PWD" "$REPOBRAIN_CAPTURE" "\${CLAUDECODE:-unset}" "\${CLAUDE_CODE_ENTRYPOINT:-unset}" "\${CLAUDE_CODE_OAUTH_TOKEN:-unset}" "\${CLAUDE_EFFORT:-unset}"`);
     const saved = { ...process.env };
     Object.assign(process.env, { CLAUDECODE: "1", CLAUDE_CODE_ENTRYPOINT: "cli", CLAUDE_CODE_OAUTH_TOKEN: "kept", CLAUDE_EFFORT: "max" });
     try {
@@ -301,7 +301,7 @@ describe("runClaude with a fake claude", () => {
     fake(`printf '%s' '${apiError(401, "Invalid API key · Fix external API key")}'; exit 1`);
     const e = await createRunClaude()("p", "s").catch((x: unknown) => x);
     expect(e).toBeInstanceOf(ClaudeEnvError);
-    expect((e as Error).message).toMatch(/CODEBRAIN_SETTING_SOURCES=user/);
+    expect((e as Error).message).toMatch(/REPOBRAIN_SETTING_SOURCES=user/);
     expect((e as Error).message).toMatch(/Invalid API key/);
   });
 
@@ -309,14 +309,14 @@ describe("runClaude with a fake claude", () => {
     fake(`printf '%s' '${apiError(429, "Rate limited")}'; exit 1`);
     const e = await createRunClaude()("p", "s").catch((x: unknown) => x);
     expect(e).toBeInstanceOf(ClaudeEnvError);
-    expect((e as Error).message).not.toMatch(/CODEBRAIN_SETTING_SOURCES/);
+    expect((e as Error).message).not.toMatch(/REPOBRAIN_SETTING_SOURCES/);
   });
 
   it("treats any api_error result as an environment error, whatever its subtype", async () => {
     fake(`printf '{"subtype":"error_during_execution","is_error":true,"terminal_reason":"api_error","result":"overloaded"}'`);
     await expect(createRunClaude()("p", "s")).rejects.toThrow(ClaudeEnvError);
     fake(`printf '{"subtype":"error_during_execution","is_error":true,"api_error_status":403,"result":"forbidden"}'; exit 1`);
-    await expect(createRunClaude()("p", "s")).rejects.toThrow(/CODEBRAIN_SETTING_SOURCES=user/);
+    await expect(createRunClaude()("p", "s")).rejects.toThrow(/REPOBRAIN_SETTING_SOURCES=user/);
   });
 
   it.each([400, 413, 422])("counts an API %i (caused by the merge, such as a prompt too long) as a result error", async (status) => {
@@ -333,19 +333,19 @@ describe("runClaude with a fake claude", () => {
   });
 
   it("reports a missing claude binary as an environment error", async () => {
-    process.env.PATH = tempDir("codebrain-nobin-");
+    process.env.PATH = tempDir("repobrain-nobin-");
     const e = await createRunClaude()("p", "s").catch((x: unknown) => x);
     expect(e).toBeInstanceOf(ClaudeEnvError);
     expect((e as Error).message).toMatch(/ENOENT/);
   });
 
-  it("suggests CODEBRAIN_SETTING_SOURCES when claude fails on auth", async () => {
+  it("suggests REPOBRAIN_SETTING_SOURCES when claude fails on auth", async () => {
     fake(`echo "Invalid API key - please run /login" >&2; exit 1`);
     const e = await createRunClaude()("p", "s").catch((x: unknown) => x);
     expect(e).toBeInstanceOf(ClaudeEnvError);
-    expect((e as Error).message).toMatch(/CODEBRAIN_SETTING_SOURCES=user/);
+    expect((e as Error).message).toMatch(/REPOBRAIN_SETTING_SOURCES=user/);
     fake(`echo boom >&2; exit 1`);
-    await expect(createRunClaude()("p", "s")).rejects.toThrow(/^(?!.*CODEBRAIN_SETTING_SOURCES).*boom/s);
+    await expect(createRunClaude()("p", "s")).rejects.toThrow(/^(?!.*REPOBRAIN_SETTING_SOURCES).*boom/s);
   });
 
   it("cleans up stray grandchildren after a normal exit", { timeout: 10_000 }, async () => {

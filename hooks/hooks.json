@@ -1,5 +1,5 @@
 {
-  "description": "Start CodeBrain capture in the background when a session starts in a connected repository.",
+  "description": "Start RepoBrain capture in the background when a session starts in a connected repository.",
   "hooks": {
     "SessionStart": [
       {

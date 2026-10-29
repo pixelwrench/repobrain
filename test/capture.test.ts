@@ -592,11 +592,11 @@ describe("runCapture", () => {
     expect(readCard(key, second.id).anchor.status).toBe("changed");
     expect(log()).toContain(`anchor check for ${first.id} failed`);
   });
-  it("normalises .codebrain/ignore lines and drops the ones git can't take", async () => {
+  it("normalises .repobrain/ignore lines and drops the ones git can't take", async () => {
     await runCapture(key, opts(fake()));
-    fs.mkdirSync(path.join(repo, ".codebrain"), { recursive: true });
-    fs.writeFileSync(path.join(repo, ".codebrain", "ignore"), "# comment\n/secrets/**\n!keep.txt\n:(top)other\n");
-    commit(repo, { "src/ref.ts": FILE, "secrets/notes.txt": "private\n", ".codebrain/ignore": fs.readFileSync(path.join(repo, ".codebrain", "ignore"), "utf8") }, "feat");
+    fs.mkdirSync(path.join(repo, ".repobrain"), { recursive: true });
+    fs.writeFileSync(path.join(repo, ".repobrain", "ignore"), "# comment\n/secrets/**\n!keep.txt\n:(top)other\n");
+    commit(repo, { "src/ref.ts": FILE, "secrets/notes.txt": "private\n", ".repobrain/ignore": fs.readFileSync(path.join(repo, ".repobrain", "ignore"), "utf8") }, "feat");
     let stdin = "";
     const report = await runCapture(key, opts(async (_p, s) => ((stdin = s), reply(JSON.stringify([cardFor("src/ref.ts")])))));
     expect(report).toMatchObject({ status: "done", cardsWritten: 1 });
@@ -608,9 +608,9 @@ describe("runCapture", () => {
 
   it("drops ignore lines with a .. segment or that git rejects, and still drafts", async () => {
     await runCapture(key, opts(fake()));
-    fs.mkdirSync(path.join(repo, ".codebrain"), { recursive: true });
+    fs.mkdirSync(path.join(repo, ".repobrain"), { recursive: true });
     const ignore = "../outside/**\nsrc/../../x\nweird/**\nsecrets/**\n";
-    commit(repo, { "src/ref.ts": FILE, "secrets/notes.txt": "private\n", ".codebrain/ignore": ignore }, "feat");
+    commit(repo, { "src/ref.ts": FILE, "secrets/notes.txt": "private\n", ".repobrain/ignore": ignore }, "feat");
     hooks.rejectPathspec = "weird/**";
     let stdin = "";
     const report = await runCapture(key, opts(async (_p, s) => ((stdin = s), reply(JSON.stringify([cardFor("src/ref.ts")])))));

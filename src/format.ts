@@ -1,7 +1,7 @@
 /**
  * The card file format: JSON-valued front matter plus a body in the content
  * vaults' question syntax (Q:/A:-D:/Correct:/Explanation: or Front:/Back:),
- * so the braineos vault importer can read cards later.
+ * so the Braineos app can import cards later.
  */
 
 export const CARD_STATUSES = ["draft", "kept", "dropped"] as const;

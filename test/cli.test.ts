@@ -171,7 +171,7 @@ describe("cli", () => {
     it("plans, skips, drafts and reports status", async () => {
       await cli("connect");
       expect(await base(["status"])).toEqual({ code: 0, out: { plan: null, totals: null, costUsd: null } });
-      expect(await base(["draft", "--next"])).toEqual({ code: 1, out: { error: "no baseline plan; run codebrain baseline plan first" } });
+      expect(await base(["draft", "--next"])).toEqual({ code: 1, out: { error: "no baseline plan; run repobrain baseline plan first" } });
       const planned = await base(["plan", "--no-fetch"], planRun);
       expect(planned).toMatchObject({ code: 0, out: { existing: false, costUsd: 0.004, plan: { areas: [{ id: "a01-referrals" }, { id: "a02-other" }] } } });
       expect(await base(["plan", "--no-fetch"], planRun)).toMatchObject({ code: 0, out: { existing: true } });
@@ -375,7 +375,7 @@ describe("cli", () => {
 
   it("works from a linked worktree of a connected repo", async () => {
     await connectAndCapture();
-    const wt = path.join(tempDir("codebrain-wt-"), "feat");
+    const wt = path.join(tempDir("repobrain-wt-"), "feat");
     sh(repo, ["worktree", "add", "-q", "-b", "feat", wt]);
     const week = await main(["week", "--repo", wt], { now, run });
     expect(week.code).toBe(0);
@@ -525,7 +525,7 @@ describe("cli", () => {
   });
 
   it("connects the main repo from a linked worktree", async () => {
-    const wt = path.join(tempDir("codebrain-wt-"), "feat");
+    const wt = path.join(tempDir("repobrain-wt-"), "feat");
     sh(repo, ["worktree", "add", "-q", "-b", "feat", wt]);
     const fromWt = (await main(["connect", "--repo", wt], { now, run })).out as { connected: string };
     expect(fromWt.connected).toBe(((await cli("connect")).out as { connected: string }).connected);
@@ -578,7 +578,7 @@ describe("cli", () => {
   });
 
   it("explains how to connect an unconnected repo, without throwing", async () => {
-    expect(await cli("due")).toEqual({ code: 1, out: { error: expect.stringMatching(/codebrain connect/) } });
+    expect(await cli("due")).toEqual({ code: 1, out: { error: expect.stringMatching(/repobrain connect/) } });
   });
 
   it("returns errors instead of throwing", async () => {
@@ -590,14 +590,14 @@ describe("cli", () => {
   });
 
   it("logs a capture in an unconnected repo to capture-errors.log", async () => {
-    expect(await cli("capture", "--no-fetch")).toEqual({ code: 1, out: { error: expect.stringMatching(/codebrain connect/) } });
+    expect(await cli("capture", "--no-fetch")).toEqual({ code: 1, out: { error: expect.stringMatching(/repobrain connect/) } });
     const log = fs.readFileSync(path.join(home(), "capture-errors.log"), "utf8");
     expect(log).toContain(repo);
-    expect(log).toMatch(/codebrain connect/);
+    expect(log).toMatch(/repobrain connect/);
   });
 
   it("logs a capture outside any git repository to capture-errors.log", async () => {
-    const dir = tempDir("codebrain-nogit-");
+    const dir = tempDir("repobrain-nogit-");
     expect((await main(["capture", "--repo", dir], { now, run })).code).toBe(1);
     expect(fs.readFileSync(path.join(home(), "capture-errors.log"), "utf8")).toContain(dir);
   });
@@ -618,11 +618,11 @@ describe("cli", () => {
   });
 });
 
-describe("the codebrain binary", () => {
+describe("the repobrain binary", () => {
   let bin: string;
   beforeAll(() => {
     // Build to a temp dir, with this repo's node_modules linked in so ts-fsrs resolves.
-    const out = tempDir("codebrain-bin-");
+    const out = tempDir("repobrain-bin-");
     const root = path.resolve(import.meta.dirname, "..");
     execFileSync(path.join(root, "node_modules", ".bin", "tsc"), ["-p", path.join(root, "tsconfig.build.json"), "--outDir", out]);
     fs.writeFileSync(path.join(out, "package.json"), '{"type":"module"}\n');
@@ -641,7 +641,7 @@ describe("the codebrain binary", () => {
     commit(repo, { "src/ref.ts": FILE }, "feat: referral codes");
 
     const unconnected = spawn(["due", "--repo", repo]);
-    expect(unconnected).toMatchObject({ code: 1, out: { error: expect.stringMatching(/codebrain connect/) } });
+    expect(unconnected).toMatchObject({ code: 1, out: { error: expect.stringMatching(/repobrain connect/) } });
     expect(unconnected.stderr).not.toMatch(/\n\s+at /);
 
     expect(spawn(["connect", "--repo", repo])).toMatchObject({ code: 0, out: { connected: expect.any(String) } });

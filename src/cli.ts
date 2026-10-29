@@ -169,10 +169,10 @@ export interface CliDeps {
   run?: RunClaude;
 }
 
-const USAGE = "usage: codebrain <connect|capture|week|curate|show|due|answer|grade|stats|card|baseline> [--repo <path>]";
+const USAGE = "usage: repobrain <connect|capture|week|curate|show|due|answer|grade|stats|card|baseline> [--repo <path>]";
 const BASELINE_USAGE =
-  "usage: codebrain baseline plan [--force] [--no-fetch], baseline draft <area-id>|--next, baseline status, baseline skip <area-id>, baseline unskip <area-id>";
-const CURATE_USAGE = "usage: codebrain curate <id> keep|fix|drop, or curate <id> fix --path P --lines S-E [--symbol X|--no-symbol]";
+  "usage: repobrain baseline plan [--force] [--no-fetch], baseline draft <area-id>|--next, baseline status, baseline skip <area-id>, baseline unskip <area-id>";
+const CURATE_USAGE = "usage: repobrain curate <id> keep|fix|drop, or curate <id> fix --path P --lines S-E [--symbol X|--no-symbol]";
 const DECISIONS = ["keep", "fix", "drop"] as const;
 type Decision = (typeof DECISIONS)[number];
 const GRADES = ["right", "wrong", "didnt-know"];
@@ -202,7 +202,7 @@ function count(value: string | undefined): number | undefined | null {
 function connected(repo: string | undefined): { key: string; repoPath: string; areaDepth: number } {
   const dir = path.resolve(repo ?? process.cwd());
   const found = findRepo(dir);
-  if (!found) throw new Error(`${dir} is not connected to CodeBrain; run \`codebrain connect\` there first`);
+  if (!found) throw new Error(`${dir} is not connected to RepoBrain; run \`repobrain connect\` there first`);
   return { key: found.key, repoPath: found.config.path, areaDepth: found.config.areaDepth };
 }
 
@@ -461,7 +461,7 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
     }
     case "grade": {
       const [id, grade] = positionals;
-      if (!id || !GRADES.includes(grade ?? "") || positionals.length > 2) return usage("usage: codebrain grade <id> right|wrong|didnt-know");
+      if (!id || !GRADES.includes(grade ?? "") || positionals.length > 2) return usage("usage: repobrain grade <id> right|wrong|didnt-know");
       if (!isSafeId(id)) return badId(id);
       const { key } = connected(values.repo);
       const found = lookupCard(key, id);
@@ -502,7 +502,7 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
     }
     case "show": {
       const id = positionals[0];
-      if (!id || positionals.length > 1) return usage("usage: codebrain show <id>");
+      if (!id || positionals.length > 1) return usage("usage: repobrain show <id>");
       if (!isSafeId(id)) return badId(id);
       const { key, repoPath } = connected(values.repo);
       const found = lookupCard(key, id);
@@ -530,7 +530,7 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
     }
     case "answer": {
       const id = positionals[0];
-      if (!id || positionals.length > 1) return usage("usage: codebrain answer <id>");
+      if (!id || positionals.length > 1) return usage("usage: repobrain answer <id>");
       if (!isSafeId(id)) return badId(id);
       const { key } = connected(values.repo);
       const found = lookupCard(key, id);
@@ -573,7 +573,7 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
     }
     case "card": {
       const id = positionals[0];
-      if (!id) return usage("usage: codebrain card <id>");
+      if (!id) return usage("usage: repobrain card <id>");
       if (!isSafeId(id)) return badId(id);
       const file = cardPath(connected(values.repo).key, id);
       if (!fs.existsSync(file)) return noCard(id);

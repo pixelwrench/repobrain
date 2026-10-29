@@ -8,10 +8,10 @@ import { commit, makeRepo, sh, tempDir, useTempHome } from "./helpers.js";
 
 /** A stand-in for bin.js that records how it was called. */
 function fakeBin(marker: string): string {
-  const file = path.join(tempDir("codebrain-bin-"), "bin.mjs");
+  const file = path.join(tempDir("repobrain-bin-"), "bin.mjs");
   fs.writeFileSync(
     file,
-    `import fs from "node:fs"; fs.writeFileSync(${JSON.stringify(marker)}, JSON.stringify({ argv: process.argv.slice(2), env: process.env.CODEBRAIN_CAPTURE }));`,
+    `import fs from "node:fs"; fs.writeFileSync(${JSON.stringify(marker)}, JSON.stringify({ argv: process.argv.slice(2), env: process.env.REPOBRAIN_CAPTURE }));`,
   );
   return file;
 }
@@ -47,13 +47,13 @@ describe("startCapture", () => {
   let repo: string;
   let home: string;
   beforeEach(() => {
-    delete process.env.CODEBRAIN_CAPTURE;
+    delete process.env.REPOBRAIN_CAPTURE;
     home = useTempHome();
     repo = makeRepo();
     commit(repo, { "a.txt": "a\n" }, "first");
   });
   afterEach(() => {
-    delete process.env.CODEBRAIN_CAPTURE;
+    delete process.env.REPOBRAIN_CAPTURE;
   });
 
   it("does nothing in a repo that isn't connected, and writes no logs", async () => {
@@ -70,7 +70,7 @@ describe("startCapture", () => {
 
   it("does nothing inside a capture's own claude session", () => {
     connectRepo(repo);
-    process.env.CODEBRAIN_CAPTURE = "1";
+    process.env.REPOBRAIN_CAPTURE = "1";
     expect(startCapture(repo, fakeBin(path.join(tempDir("m-"), "x")))).toBe(false);
   });
 
@@ -83,23 +83,23 @@ describe("startCapture", () => {
 
   it("passes the main repo's path when the session is in a linked worktree", async () => {
     connectRepo(repo);
-    const wt = path.join(tempDir("codebrain-wt-"), "feat");
+    const wt = path.join(tempDir("repobrain-wt-"), "feat");
     sh(repo, ["worktree", "add", "-q", "-b", "feat", wt]);
     const marker = path.join(tempDir("m-"), "called.json");
     expect(startCapture(path.join(wt), fakeBin(marker))).toBe(true);
     expect(JSON.parse(await waitFor(marker))).toEqual({ argv: ["capture", "--repo", repo], env: "1" });
   });
 
-  it("logs and does nothing when the codebrain bin is missing", () => {
+  it("logs and does nothing when the repobrain bin is missing", () => {
     const key = connectRepo(repo);
-    const bin = path.join(tempDir("codebrain-bin-"), "bin.js");
+    const bin = path.join(tempDir("repobrain-bin-"), "bin.js");
     expect(startCapture(repo, bin)).toBe(false);
-    expect(fs.readFileSync(path.join(repoDir(key), "capture.log"), "utf8")).toContain(`codebrain bin missing at ${bin}; rebuild or reinstall`);
+    expect(fs.readFileSync(path.join(repoDir(key), "capture.log"), "utf8")).toContain(`repobrain bin missing at ${bin}; rebuild or reinstall`);
   });
 
   it("sends the detached capture's stderr to capture-errors.log", async () => {
     connectRepo(repo);
-    const bin = path.join(tempDir("codebrain-bin-"), "bin.mjs");
+    const bin = path.join(tempDir("repobrain-bin-"), "bin.mjs");
     fs.writeFileSync(bin, `import "./no-such-module.js";`);
     expect(startCapture(repo, bin)).toBe(true);
     const log = path.join(home, "capture-errors.log");
@@ -126,21 +126,21 @@ describe("the built hook", () => {
   let repo: string;
   let home: string;
   let env: NodeJS.ProcessEnv;
-  /** A copy of the build whose bin.js only records how it was called, to the file in CODEBRAIN_TEST_MARKER. */
+  /** A copy of the build whose bin.js only records how it was called, to the file in REPOBRAIN_TEST_MARKER. */
   let recordingHookBin: string;
   beforeAll(() => {
     // Build to a temp dir, with this repo's node_modules linked in so ts-fsrs resolves.
-    const out = tempDir("codebrain-hook-");
+    const out = tempDir("repobrain-hook-");
     const root = path.resolve(import.meta.dirname, "..");
     execFileSync(path.join(root, "node_modules", ".bin", "tsc"), ["-p", path.join(root, "tsconfig.build.json"), "--outDir", out]);
     fs.writeFileSync(path.join(out, "package.json"), '{"type":"module"}\n');
     fs.symlinkSync(path.join(root, "node_modules"), path.join(out, "node_modules"));
     hookBin = path.join(out, "hook-bin.js");
-    const recording = tempDir("codebrain-hook-rec-");
+    const recording = tempDir("repobrain-hook-rec-");
     fs.cpSync(out, recording, { recursive: true, verbatimSymlinks: true });
     fs.writeFileSync(
       path.join(recording, "bin.js"),
-      'import fs from "node:fs"; fs.writeFileSync(process.env.CODEBRAIN_TEST_MARKER, JSON.stringify({ argv: process.argv.slice(2), env: process.env.CODEBRAIN_CAPTURE }));',
+      'import fs from "node:fs"; fs.writeFileSync(process.env.REPOBRAIN_TEST_MARKER, JSON.stringify({ argv: process.argv.slice(2), env: process.env.REPOBRAIN_CAPTURE }));',
     );
     recordingHookBin = path.join(recording, "hook-bin.js");
   }, 60_000);
@@ -148,8 +148,8 @@ describe("the built hook", () => {
     home = useTempHome();
     repo = makeRepo();
     commit(repo, { "a.txt": "a\n" }, "first");
-    env = { ...process.env, CODEBRAIN_HOME: home };
-    delete env.CODEBRAIN_CAPTURE;
+    env = { ...process.env, REPOBRAIN_HOME: home };
+    delete env.REPOBRAIN_CAPTURE;
   });
 
   it("does nothing, and writes nothing, for an unconnected repo", () => {
@@ -171,17 +171,17 @@ describe("the built hook", () => {
 
   it("spawns capture for the main repo when the session is in a worktree outside it", async () => {
     connectRepo(repo);
-    const wt = path.join(tempDir("codebrain-wt-"), "feat");
+    const wt = path.join(tempDir("repobrain-wt-"), "feat");
     sh(repo, ["worktree", "add", "-q", "-b", "feat", wt]);
     const marker = path.join(tempDir("m-"), "called.json");
-    const r = runHook(recordingHookBin, JSON.stringify({ cwd: path.join(wt) }), { ...env, CODEBRAIN_TEST_MARKER: marker });
+    const r = runHook(recordingHookBin, JSON.stringify({ cwd: path.join(wt) }), { ...env, REPOBRAIN_TEST_MARKER: marker });
     expect(r).toMatchObject({ status: 0, stdout: "", stderr: "" });
     expect(JSON.parse(await waitFor(marker))).toEqual({ argv: ["capture", "--repo", repo], env: "1" });
   });
 
   it("still exits 0 quickly when git hangs", () => {
     connectRepo(repo);
-    const stub = tempDir("codebrain-stub-");
+    const stub = tempDir("repobrain-stub-");
     fs.writeFileSync(path.join(stub, "git"), "#!/bin/sh\nexec sleep 10\n", { mode: 0o755 });
     const r = runHook(hookBin, JSON.stringify({ cwd: repo }), { ...env, PATH: `${stub}${path.delimiter}${env.PATH}` });
     expect(r.status).toBe(0);
@@ -189,7 +189,7 @@ describe("the built hook", () => {
   });
 
   it("never runs git for a directory outside every connected repo", () => {
-    const stub = tempDir("codebrain-stub-");
+    const stub = tempDir("repobrain-stub-");
     const marker = path.join(stub, "git-ran");
     fs.writeFileSync(path.join(stub, "git"), `#!/bin/sh\ntouch ${JSON.stringify(marker)}\nexit 1\n`, { mode: 0o755 });
     const pathEnv = `${stub}${path.delimiter}${env.PATH}`;
@@ -197,13 +197,13 @@ describe("the built hook", () => {
     expect(runHook(hookBin, JSON.stringify({ cwd: repo }), { ...env, PATH: pathEnv }).status).toBe(0);
     // A repo connected, but the session is elsewhere.
     connectRepo(repo);
-    expect(runHook(hookBin, JSON.stringify({ cwd: tempDir("codebrain-plain-") }), { ...env, PATH: pathEnv }).status).toBe(0);
+    expect(runHook(hookBin, JSON.stringify({ cwd: tempDir("repobrain-plain-") }), { ...env, PATH: pathEnv }).status).toBe(0);
     expect(fs.existsSync(marker)).toBe(false);
   });
 
   it("does nothing inside a capture's own claude session", async () => {
     const key = connectRepo(repo);
-    const r = runHook(hookBin, JSON.stringify({ cwd: repo }), { ...env, CODEBRAIN_CAPTURE: "1" });
+    const r = runHook(hookBin, JSON.stringify({ cwd: repo }), { ...env, REPOBRAIN_CAPTURE: "1" });
     expect(r.status).toBe(0);
     await new Promise((res) => setTimeout(res, 500));
     expect(fs.existsSync(path.join(repoDir(key), "state.json"))).toBe(false);
@@ -221,7 +221,7 @@ describe("the built hook", () => {
       c.on("exit", (code) => process.exit(code ?? 99));`;
     const started = Date.now();
     const r = spawnSync(process.execPath, ["-e", parent.replace(JSON.stringify("HOOK"), JSON.stringify(hookBin))], {
-      env, cwd: tempDir("codebrain-cwd-"), encoding: "utf8", timeout: 15_000,
+      env, cwd: tempDir("repobrain-cwd-"), encoding: "utf8", timeout: 15_000,
     });
     expect(r.status).toBe(0);
     expect(Date.now() - started).toBeLessThan(6000);

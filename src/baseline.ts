@@ -111,7 +111,7 @@ function isPlan(v: unknown): v is BaselinePlan {
 export function readPlan(key: string): BaselinePlan | null {
   const raw = readJson<unknown>(planPath(key), null);
   if (raw === null) return null;
-  if (!isPlan(raw)) throw new Error(`codebrain: ${planPath(key)} is not a valid baseline plan; fix or delete it, or run codebrain baseline plan --force`);
+  if (!isPlan(raw)) throw new Error(`repobrain: ${planPath(key)} is not a valid baseline plan; fix or delete it, or run repobrain baseline plan --force`);
   return raw;
 }
 
@@ -128,7 +128,7 @@ function lockOrThrow(key: string): Lock {
 /** The connected repo's path and area depth, or a BaselineError. */
 function repoOf(key: string) {
   const repo = loadConfig().repos[key];
-  if (!repo) throw new BaselineError(`unknown repo ${key}; run codebrain connect first`);
+  if (!repo) throw new BaselineError(`unknown repo ${key}; run repobrain connect first`);
   return repo;
 }
 
@@ -178,7 +178,7 @@ export function validateAreas(raws: unknown[], sent: Set<string>): { areas: Base
 
 /**
  * The text files the baseline may send at `commit`: not excluded (capture's exclusions and
- * `.codebrain/ignore`), not a sensitive path, no secret-looking text in the path itself, and no
+ * `.repobrain/ignore`), not a sensitive path, no secret-looking text in the path itself, and no
  * control characters, which would break the one-path-per-line list. `only` limits the check to those paths.
  */
 function sendableFiles(key: string, repoPath: string, commit: string, only?: string[]): TreeFile[] {
@@ -238,7 +238,7 @@ export async function planBaseline(key: string, opts: PlanOptions = {}): Promise
   const repo = repoOf(key);
   const existing = readPlan(key);
   if (existing && !opts.force) {
-    const note = `a baseline plan from ${existing.plannedAt} exists; run codebrain baseline plan --force to re-plan at the current head`;
+    const note = `a baseline plan from ${existing.plannedAt} exists; run repobrain baseline plan --force to re-plan at the current head`;
     return { existing: true, note, plan: existing, sent: null, rejected: [], costUsd: null };
   }
   const now = opts.now ?? (() => new Date());
@@ -322,9 +322,9 @@ function numbered(p: string, content: string): string {
 function pickArea(plan: BaselinePlan, opts: DraftAreaOptions): BaselineArea | null {
   if (opts.next) return plan.areas.find((a) => a.status === "planned") ?? null;
   const area = plan.areas.find((a) => a.id === opts.areaId);
-  if (!area) throw new BaselineError(`no area ${opts.areaId} in the baseline plan; run codebrain baseline status to see them`);
-  if (area.status === "drafted") throw new BaselineError(`area ${area.id} is already drafted; its cards are in /codebrain:week`);
-  if (area.status === "skipped") throw new BaselineError(`area ${area.id} is skipped; run codebrain baseline unskip ${area.id} first`);
+  if (!area) throw new BaselineError(`no area ${opts.areaId} in the baseline plan; run repobrain baseline status to see them`);
+  if (area.status === "drafted") throw new BaselineError(`area ${area.id} is already drafted; its cards are in /repobrain:week`);
+  if (area.status === "skipped") throw new BaselineError(`area ${area.id} is skipped; run repobrain baseline unskip ${area.id} first`);
   return area;
 }
 
@@ -334,7 +334,7 @@ export async function draftBaselineArea(key: string, opts: DraftAreaOptions): Pr
   const lock = lockOrThrow(key);
   try {
     const plan = readPlan(key);
-    if (!plan) throw new BaselineError("no baseline plan; run codebrain baseline plan first");
+    if (!plan) throw new BaselineError("no baseline plan; run repobrain baseline plan first");
     const area = pickArea(plan, opts);
     const report: AreaDraftReport = { area: null, cardsWritten: 0, rejected: [], dropped: [], skippedFiles: [], costUsd: null };
     if (!area) {
@@ -358,7 +358,7 @@ export async function draftBaselineArea(key: string, opts: DraftAreaOptions): Pr
 
     let body = "";
     const sent: string[] = [];
-    // Re-checked now: `.codebrain/ignore` may have gained lines since the plan was made.
+    // Re-checked now: `.repobrain/ignore` may have gained lines since the plan was made.
     const allowed = new Set(sendableFiles(key, repo.path, plan.commit, area.files).map((f) => f.path));
     for (const p of area.files) {
       if (isSensitivePath(p)) {
@@ -486,7 +486,7 @@ export async function setAreaSkipped(key: string, id: string, skip: boolean, opt
   if (!lock) throw new BaselineError(`busy, try again: ${LOCKED.split(";")[0]}`);
   try {
     const plan = readPlan(key);
-    if (!plan) throw new BaselineError("no baseline plan; run codebrain baseline plan first");
+    if (!plan) throw new BaselineError("no baseline plan; run repobrain baseline plan first");
     const area = plan.areas.find((a) => a.id === id);
     if (!area) throw new BaselineError(`no area ${id} in the baseline plan`);
     if (skip && area.status !== "planned" && area.status !== "failed") throw new BaselineError(`area ${id} is ${area.status}; only planned or failed areas can be skipped`);

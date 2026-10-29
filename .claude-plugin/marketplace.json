@@ -1,6 +1,6 @@
 {
-  "name": "codebrain-local",
+  "name": "repobrain",
   "owner": { "name": "pixelwrench" },
-  "description": "Local marketplace for dogfooding the CodeBrain plugin from a built checkout.",
-  "plugins": [{ "name": "codebrain", "source": "./", "description": "CodeBrain: review cards from merged changes." }]
+  "description": "RepoBrain: spaced-repetition cards from merged changes, drafted by your own Claude.",
+  "plugins": [{ "name": "repobrain", "source": "./", "description": "RepoBrain: review cards from merged changes." }]
 }

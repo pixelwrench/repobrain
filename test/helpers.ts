@@ -12,7 +12,7 @@ export function sh(dir: string, args: string[]): string {
 }
 
 export function makeRepo(): string {
-  const dir = tempDir("codebrain-repo-");
+  const dir = tempDir("repobrain-repo-");
   sh(dir, ["init", "-q", "-b", "master"]);
   sh(dir, ["config", "user.email", "test@example.com"]);
   sh(dir, ["config", "user.name", "Test"]);
@@ -36,9 +36,9 @@ export function commit(dir: string, files: Record<string, string | null>, messag
   return sh(dir, ["rev-parse", "HEAD"]);
 }
 
-/** Points CODEBRAIN_HOME at a fresh temp dir for this test. */
+/** Points REPOBRAIN_HOME at a fresh temp dir for this test. */
 export function useTempHome(): string {
-  const home = tempDir("codebrain-home-");
-  process.env.CODEBRAIN_HOME = home;
+  const home = tempDir("repobrain-home-");
+  process.env.REPOBRAIN_HOME = home;
   return home;
 }
