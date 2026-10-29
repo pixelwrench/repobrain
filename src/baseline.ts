@@ -168,6 +168,16 @@ export function validateAreas(raws: unknown[], sent: Set<string>): { areas: Base
   return { areas, rejected };
 }
 
+/**
+ * The text files the baseline may send at `commit`: not excluded (capture's exclusions and
+ * `.codebrain/ignore`), not a sensitive path, and no control characters, which would break the
+ * one-path-per-line list. `only` limits the check to those paths.
+ */
+function sendableFiles(key: string, repoPath: string, commit: string, only?: string[]): TreeFile[] {
+  const excludes = repoExcludes(repoPath, (line, why) => appendLog(key, `ignore line dropped: ${JSON.stringify(line)} (${why})`));
+  return treeFiles(repoPath, commit, excludes, only).filter((f) => !isSensitivePath(f.path) && !/[\u0000-\u001f]/.test(f.path));
+}
+
 /** The README at the repo root to send: README.md, else README, else the first other readme.*. */
 function readmeOf(files: TreeFile[]): string | null {
   const root = files.map((f) => f.path).filter((p) => /^readme(\.[^/]*)?$/i.test(p));
@@ -213,9 +223,7 @@ export async function planBaseline(key: string, opts: PlanOptions = {}): Promise
     const commit = branch && resolveCommit(repo.path, branch);
     if (!commit) throw new BaselineError("no default branch with commits found; nothing to plan");
 
-    const excludes = repoExcludes(repo.path, (line, why) => appendLog(key, `ignore line dropped: ${JSON.stringify(line)} (${why})`));
-    // A path with a control character would break the one-path-per-line list.
-    const all = treeFiles(repo.path, commit, excludes).filter((f) => !isSensitivePath(f.path) && !/[\u0000-\u001f]/.test(f.path));
+    const all = sendableFiles(key, repo.path, commit);
     const listed = all.slice(0, MAX_PLAN_FILES);
     const readmePath = readmeOf(all);
     const readmeText = readmePath === null ? null : fileAt(repo.path, commit, readmePath);
@@ -323,9 +331,15 @@ export async function draftBaselineArea(key: string, opts: DraftAreaOptions): Pr
 
     let body = "";
     const sent: string[] = [];
+    // Re-checked now: `.codebrain/ignore` may have gained lines since the plan was made.
+    const allowed = new Set(sendableFiles(key, repo.path, plan.commit, area.files).map((f) => f.path));
     for (const p of area.files) {
       if (isSensitivePath(p)) {
         report.dropped.push({ path: p, reason: "sensitive path" });
+        continue;
+      }
+      if (!allowed.has(p)) {
+        report.dropped.push({ path: p, reason: "excluded" });
         continue;
       }
       const content = fileAt(repo.path, plan.commit, p);

@@ -244,6 +244,16 @@ describe("baseline", () => {
       expect(stdin).not.toContain("// big");
     });
 
+    it("re-applies the exclusions at draft time, so a path ignored after planning isn't sent", async () => {
+      await planned();
+      fs.writeFileSync(path.join(repo, ".codebrain", "ignore"), "secrets/**\nsrc/server.ts\n");
+      let stdin = "";
+      const out = await draft({ areaId: "a02-referrals" }, async (_p, s) => ((stdin = s), reply([card("src/ref.ts")])));
+      expect(out.dropped).toEqual([{ path: "src/server.ts", reason: "excluded" }]);
+      expect(stdin).toContain("File: src/ref.ts\n");
+      expect(stdin).not.toContain("src/server.ts");
+    });
+
     it("fails the area without calling claude when no file can be sent", async () => {
       commit(repo, { "src/keys.ts": `export const k = "${AWS_KEY}";\n` }, "keys");
       await planned([{ name: "Keys", why: "w", files: ["src/keys.ts"] }]);

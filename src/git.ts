@@ -119,8 +119,13 @@ function isTooLarge(err: unknown): boolean {
   return e.code === "ENOBUFS" || /maxBuffer/i.test(e.message ?? "");
 }
 
-/** Every path except the excluded ones (glob pathspecs), so diffs and file lists leave out the same paths. */
-const excludeSpec = (excludes: string[]): string[] => ["--", ".", ...excludes.map((e) => `:(exclude,glob)${e}`)];
+/**
+ * Every path (or only the `only` paths, taken literally) except the excluded ones (glob pathspecs),
+ * so diffs and file lists leave out the same paths.
+ */
+const excludeSpec = (excludes: string[], only?: string[]): string[] => [
+  "--", ...(only ? only.map((p) => `:(literal)${p}`) : ["."]), ...excludes.map((e) => `:(exclude,glob)${e}`),
+];
 
 const emptyTree = (repo: string): string => git(repo, ["hash-object", "-t", "tree", "/dev/null"]).trim();
 
@@ -154,10 +159,12 @@ export interface TreeFile {
 /**
  * The text files in a commit's tree with their line counts, in git's path order, without excluded
  * paths (the same glob pathspecs as commitDiff). Binary files are left out. Diffing the tree against
- * the empty tree gives both the exclusions and the line counts from git itself.
+ * the empty tree gives both the exclusions and the line counts from git itself. `only` limits the
+ * listing to those paths.
  */
-export function treeFiles(repo: string, sha: string, excludes: string[]): TreeFile[] {
-  const out = git(repo, ["diff", "--numstat", "-z", "--no-renames", "--no-ext-diff", "--no-textconv", emptyTree(repo), sha, ...excludeSpec(excludes)], {
+export function treeFiles(repo: string, sha: string, excludes: string[], only?: string[]): TreeFile[] {
+  if (only?.length === 0) return [];
+  const out = git(repo, ["diff", "--numstat", "-z", "--no-renames", "--no-ext-diff", "--no-textconv", emptyTree(repo), sha, ...excludeSpec(excludes, only)], {
     timeoutMs: 120_000,
   });
   return out
