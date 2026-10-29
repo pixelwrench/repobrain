@@ -144,6 +144,19 @@ export function readCard(key: string, id: string): Card {
   return card;
 }
 
+/**
+ * Whether writing this drafted card is safe. A card file that exists and isn't a draft
+ * (or can't be read) holds the user's curation, which a retry must never replace.
+ */
+export function mayWriteDraft(key: string, id: string): boolean {
+  if (!fs.existsSync(cardPath(key, id))) return true;
+  try {
+    return readCard(key, id).status === "draft";
+  } catch {
+    return false;
+  }
+}
+
 export interface CardListing {
   cards: Card[];
   /** Card files that couldn't be read (a broken edit, say), with why. `file` is the absolute path. */

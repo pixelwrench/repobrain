@@ -37,6 +37,9 @@ export function findSecrets(text: string): string[] {
 const SENSITIVE_PATH =
   /(^|\/)(\.env[^/]*|\.npmrc|\.netrc|\.pypirc|\.pgpass|credentials\.json|service-account[^/]*\.json|[^/]*\.(pem|key|p12|pfx|p8|jks|keystore|tfstate)|id_(rsa|ed25519|ecdsa)[^/]*)$/i;
 
+/** Whether a path names a file that holds credentials or keys by its nature (`.env`, `*.pem`, `id_rsa` and so on). */
+export const isSensitivePath = (p: string): boolean => SENSITIVE_PATH.test(p);
+
 const C_ESCAPES: Record<string, number> = { a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13 };
 
 /** Undoes git's C-style path quoting ("caf\303\251" -> "café"). */
@@ -143,7 +146,7 @@ export function filterDiff(diff: string): FilteredDiff {
     const [header = "", ...hunks] = file.split(/^(?=@@ )/m);
     const paths = file.startsWith("diff --git ") ? sectionPaths(header) : [];
     // Fail closed: no path we can check means we can't tell it's safe.
-    if (paths.length === 0 || paths.some((p) => SENSITIVE_PATH.test(p)) || findSecrets(header).length > 0) {
+    if (paths.length === 0 || paths.some(isSensitivePath) || findSecrets(header).length > 0) {
       droppedFiles++;
       continue;
     }

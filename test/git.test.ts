@@ -14,6 +14,7 @@ import {
   resolveCommit,
   repoRoots,
   toplevel,
+  treeFiles,
 } from "../src/git.js";
 import { commit, makeRepo, sh, tempDir } from "./helpers.js";
 
@@ -85,6 +86,25 @@ describe("git helpers", () => {
     const diff = commitDiff(repo, resolveCommit(repo, "HEAD")!, ["**/package-lock.json"]);
     expect(diff).toContain("src/b.ts");
     expect(diff).not.toContain("package-lock.json");
+  });
+
+  it("lists a commit's text files with line counts, honouring the same excludes as diffs and skipping binaries", () => {
+    const repo = makeRepo();
+    const sha = commit(
+      repo,
+      {
+        "a.txt": "one\ntwo\n", "src/b c.ts": "export const b = 1;", "src/é.ts": "x\n", "package-lock.json": "{}\n",
+        "lib/vendor/x.js": "v\n", "img.bin": "\u0000\u0001\u0002", "empty.txt": "",
+      },
+      "first",
+    );
+    commit(repo, { "later.txt": "later\n" }, "second");
+    expect(treeFiles(repo, sha, ["**/package-lock.json", "**/vendor/**"])).toEqual([
+      { path: "a.txt", lines: 2 },
+      { path: "empty.txt", lines: 0 },
+      { path: "src/b c.ts", lines: 1 },
+      { path: "src/é.ts", lines: 1 },
+    ]);
   });
 
   it("diffs a root commit", () => {

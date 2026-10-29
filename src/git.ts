@@ -119,16 +119,21 @@ function isTooLarge(err: unknown): boolean {
   return e.code === "ENOBUFS" || /maxBuffer/i.test(e.message ?? "");
 }
 
+/** Every path except the excluded ones (glob pathspecs), so diffs and file lists leave out the same paths. */
+const excludeSpec = (excludes: string[]): string[] => ["--", ".", ...excludes.map((e) => `:(exclude,glob)${e}`)];
+
+const emptyTree = (repo: string): string => git(repo, ["hash-object", "-t", "tree", "/dev/null"]).trim();
+
 /**
  * The change a commit made to its first parent, without excluded paths (glob pathspecs).
  * Null means skip it: its first parent is missing (a shallow boundary) or the diff exceeds maxBytes.
  */
 export function commitDiff(repo: string, sha: string, excludes: string[], maxBytes = 60_000): string | null {
-  const spec = ["--", ".", ...excludes.map((e) => `:(exclude,glob)${e}`)];
+  const spec = excludeSpec(excludes);
   const parents = rawParents(repo, sha);
   let base: string;
   if (parents.length === 0) {
-    base = git(repo, ["hash-object", "-t", "tree", "/dev/null"]).trim();
+    base = emptyTree(repo);
   } else {
     if (tryGit(repo, ["cat-file", "-e", `${parents[0]}^{commit}`]) === null) return null;
     base = parents[0];
@@ -139,6 +144,30 @@ export function commitDiff(repo: string, sha: string, excludes: string[], maxByt
     if (isTooLarge(err)) return null;
     throw err;
   }
+}
+
+export interface TreeFile {
+  path: string;
+  lines: number;
+}
+
+/**
+ * The text files in a commit's tree with their line counts, in git's path order, without excluded
+ * paths (the same glob pathspecs as commitDiff). Binary files are left out. Diffing the tree against
+ * the empty tree gives both the exclusions and the line counts from git itself.
+ */
+export function treeFiles(repo: string, sha: string, excludes: string[]): TreeFile[] {
+  const out = git(repo, ["diff", "--numstat", "-z", "--no-renames", "--no-ext-diff", "--no-textconv", emptyTree(repo), sha, ...excludeSpec(excludes)], {
+    timeoutMs: 120_000,
+  });
+  return out
+    .split("\0")
+    .filter(Boolean)
+    .flatMap((entry) => {
+      // "added<TAB>deleted<TAB>path"; a binary file has "-" for both counts.
+      const m = /^(\d+|-)\t(\d+|-)\t([\s\S]+)$/.exec(entry);
+      return m && m[1] !== "-" ? [{ path: m[3]!, lines: Number(m[1]) }] : [];
+    });
 }
 
 /** A file's content at `rev`, or null when the path is missing, empty or not a file (a directory, say). */

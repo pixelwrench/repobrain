@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { diffPaths, filterDiff, findSecrets, rebalanceAnswers, validateCard } from "../src/guard.js";
+import { diffPaths, filterDiff, findSecrets, isSensitivePath, rebalanceAnswers, validateCard } from "../src/guard.js";
 import type { CardBody } from "../src/format.js";
 
 // Built by concatenation so secret scanners don't flag this repo.
@@ -69,6 +69,15 @@ describe("findSecrets", () => {
     ]) {
       expect(findSecrets(line), line).toEqual([]);
     }
+  });
+});
+
+describe("isSensitivePath", () => {
+  it("flags credential and key files anywhere in the tree, and nothing else", () => {
+    for (const p of [".env", "app/.env.local", ".npmrc", "config/credentials.json", "certs/server.pem", "id_rsa.pub", "infra/main.tfstate"]) {
+      expect(isSensitivePath(p)).toBe(true);
+    }
+    for (const p of ["src/env.ts", "README.md", "src/keys.ts", "docs/credentials.md"]) expect(isSensitivePath(p)).toBe(false);
   });
 });
 

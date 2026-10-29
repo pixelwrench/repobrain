@@ -1,17 +1,11 @@
-import fs from "node:fs";
 import path from "node:path";
 import { locateAnchor, type AnchorMatch } from "./anchor.js";
+import { repoExcludes } from "./excludes.js";
 import type { Anchor, Card } from "./format.js";
 import { ClaudeEnvError, ClaudeLimitError, ClaudeResultError, costLabel, draftCards, ModelOutputError, runClaude, totalCost, type RunClaude } from "./generate.js";
 import { commitDiff, defaultBranch, fetchQuietly, fileAt, firstParentCommits, git, isAncestor, mergeBase, resolveCommit, toplevel } from "./git.js";
 import { diffPaths, filterDiff } from "./guard.js";
-import { acquireLock, appendLog, cardPath, listCards, loadConfig, readCard, readState, writeCard, writeState, type RepoConfig, type RepoState } from "./store.js";
-
-/** Glob pathspecs never sent to the model. `.codebrain/ignore` in the repo adds more, one per line. */
-export const DEFAULT_EXCLUDES = [
-  "**/package-lock.json", "**/pnpm-lock.yaml", "**/yarn.lock", "**/*.lock", "**/*.min.js", "**/*.map",
-  "**/*.snap", "**/dist/**", "**/build/**", "**/vendor/**", "**/node_modules/**", "**/.env*", "**/*.pem", "**/*.key",
-];
+import { acquireLock, appendLog, listCards, loadConfig, mayWriteDraft, readCard, readState, writeCard, writeState, type RepoConfig, type RepoState } from "./store.js";
 
 const DEFAULT_MAX_MERGES = 5;
 const DEFAULT_MAX_DIFF_BYTES = 60_000;
@@ -44,56 +38,6 @@ export interface CaptureReport {
   error?: string;
 }
 
-/**
- * `.codebrain/ignore` as git pathspec globs. A leading `/` (gitignore's "from the root") is
- * stripped, since pathspecs are already relative to the root. Lines git would reject or read as
- * something else are dropped, each reported through `drop`: `!` negation, `:` pathspec magic,
- * any `..` segment, and anything else git refuses as an exclude pathspec (checked once per run).
- */
-function readIgnore(repoPath: string, drop: (line: string, why: string) => void): string[] {
-  let text: string;
-  try {
-    text = fs.readFileSync(path.join(repoPath, ".codebrain", "ignore"), "utf8");
-  } catch {
-    return [];
-  }
-  return text.split("\n").flatMap((raw) => {
-    const line = raw.trim();
-    if (!line || line.startsWith("#")) return [];
-    if (line.startsWith("!") || line.startsWith(":")) {
-      drop(line, "negation and pathspec magic aren't supported");
-      return [];
-    }
-    const glob = line.replace(/^\/+/, "");
-    if (!glob) return [];
-    if (glob.split("/").includes("..")) {
-      drop(line, "a .. segment would reach outside the repository");
-      return [];
-    }
-    const problem = pathspecProblem(repoPath, glob);
-    if (problem !== null) {
-      drop(line, `git rejects it: ${problem}`);
-      return [];
-    }
-    return [glob];
-  });
-}
-
-/** Paired with an exclude so ls-files has a positive pathspec that matches nothing, and prints nothing. */
-const NO_MATCH = ":(literal).codebrain/no-such-file-pathspec-check";
-
-/** Why git rejects `glob` as an exclude pathspec, or null when it takes it. */
-function pathspecProblem(repoPath: string, glob: string): string | null {
-  try {
-    git(repoPath, ["ls-files", "--", NO_MATCH, `:(exclude,glob)${glob}`], { timeoutMs: 5_000 });
-    return null;
-  } catch (e) {
-    const err = e as { stderr?: unknown };
-    const detail = typeof err.stderr === "string" && err.stderr.trim() ? err.stderr.trim() : message(e);
-    return detail.split("\n")[0]!.slice(0, 200);
-  }
-}
-
 /** git refused a pathspec: a problem with the excludes, so every merge would hit it, not just this one. */
 const PATHSPEC_ERROR = /\bpathspec\b|outside repository/i;
 
@@ -109,19 +53,6 @@ function objectId(repo: string, rev: string, p: string): string | null {
 function memo<V>(cache: Map<string, V>, k: string, load: () => V): V {
   if (!cache.has(k)) cache.set(k, load());
   return cache.get(k)!;
-}
-
-/**
- * Whether writing this drafted card is safe. A card file that exists and isn't a draft
- * (or can't be read) holds the user's curation, which a retry must never replace.
- */
-function mayWrite(key: string, id: string): boolean {
-  if (!fs.existsSync(cardPath(key, id))) return true;
-  try {
-    return readCard(key, id).status === "draft";
-  } catch {
-    return false;
-  }
 }
 
 const message = (e: unknown): string => (e instanceof Error ? e.message : String(e));
@@ -252,7 +183,7 @@ async function captureMerges(
   // Old state files have no processed list: fall back to merges that have card files.
   const done = new Set(state.processed ?? listCards(key).map((c) => c.merge));
   state.processed ??= [];
-  const excludes = [...DEFAULT_EXCLUDES, ...readIgnore(repo.path, (line, why) => appendLog(key, `ignore line dropped: ${JSON.stringify(line)} (${why})`))];
+  const excludes = repoExcludes(repo.path, (line, why) => appendLog(key, `ignore line dropped: ${JSON.stringify(line)} (${why})`));
   let commits;
   try {
     commits = firstParentCommits(repo.path, from, head, from ? undefined : opts.since).slice(0, opts.maxMerges ?? DEFAULT_MAX_MERGES);
@@ -353,7 +284,7 @@ async function captureMerges(
     spent(costUsd);
     let written = 0;
     for (const card of cards) {
-      if (!mayWrite(key, card.id)) {
+      if (!mayWriteDraft(key, card.id)) {
         appendLog(key, `${commit.sha} not overwriting ${card.id}: it exists and isn't a draft`);
         continue;
       }
