@@ -388,6 +388,26 @@ describe("baseline", () => {
     expect(acquireLock(key)).not.toBeNull();
   });
 
+  it.each([
+    ["cards as a string", (p: any) => (p.areas[0].cards = "1")],
+    ["costUsd as a string", (p: any) => (p.areas[0].costUsd = "0.01")],
+    ["why missing", (p: any) => delete p.areas[0].why],
+    ["planCostUsd as a string", (p: any) => (p.planCostUsd = "0")],
+    ["error as a number", (p: any) => (p.areas[0].error = 5)],
+    ["a non-string file", (p: any) => p.areas[0].files.push(1)],
+    ["a bad status", (p: any) => (p.areas[0].status = "done")],
+    ["a repeated area id", (p: any) => (p.areas[1].id = p.areas[0].id)],
+    ["a commit that isn't a full SHA", (p: any) => (p.commit = "HEAD")],
+  ])("reports a baseline.json with %s as corrupt instead of using it", async (_name, corrupt) => {
+    await planned();
+    const file = path.join(repoDir(key), "baseline.json");
+    const p = JSON.parse(fs.readFileSync(file, "utf8"));
+    corrupt(p);
+    fs.writeFileSync(file, JSON.stringify(p));
+    expect(() => readPlan(key)).toThrow(/baseline\.json is not a valid baseline plan/);
+    expect(() => baselineStatus(key)).toThrow(/not a valid baseline plan/);
+  });
+
   it("reports a corrupt baseline.json clearly", () => {
     fs.mkdirSync(repoDir(key), { recursive: true });
     fs.writeFileSync(path.join(repoDir(key), "baseline.json"), JSON.stringify({ commit: "x" }));

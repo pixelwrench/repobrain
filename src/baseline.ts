@@ -89,14 +89,22 @@ export function buildBaselinePrompt(): string {
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 
-function isPlan(v: unknown): v is BaselinePlan {
-  if (!isObject(v) || typeof v.commit !== "string" || typeof v.plannedAt !== "string" || !Array.isArray(v.areas)) return false;
-  if (typeof v.nonce !== "string" || !/^[0-9a-f]{4}$/.test(v.nonce)) return false;
-  return v.areas.every(
-    (a) =>
-      isObject(a) && typeof a.id === "string" && isSafeId(a.id) && typeof a.name === "string" && Array.isArray(a.files) &&
-      a.files.every((f) => typeof f === "string") && (AREA_STATUSES as readonly unknown[]).includes(a.status),
+const isCost = (v: unknown): boolean => v === null || (typeof v === "number" && Number.isFinite(v));
+
+function isArea(a: unknown): a is BaselineArea {
+  return (
+    isObject(a) && typeof a.id === "string" && isSafeId(a.id) && typeof a.name === "string" && typeof a.why === "string" &&
+    Array.isArray(a.files) && a.files.every((f) => typeof f === "string") && (AREA_STATUSES as readonly unknown[]).includes(a.status) &&
+    typeof a.cards === "number" && Number.isInteger(a.cards) && a.cards >= 0 && isCost(a.costUsd) &&
+    (a.error === undefined || typeof a.error === "string")
   );
+}
+
+/** Every field checked, so a hand-edited or damaged file is reported rather than read as NaN or undefined. */
+function isPlan(v: unknown): v is BaselinePlan {
+  if (!isObject(v) || typeof v.commit !== "string" || !/^[0-9a-f]{40,64}$/.test(v.commit) || typeof v.plannedAt !== "string") return false;
+  if (typeof v.nonce !== "string" || !/^[0-9a-f]{4}$/.test(v.nonce) || !isCost(v.planCostUsd) || !Array.isArray(v.areas)) return false;
+  return v.areas.every(isArea) && new Set(v.areas.map((a) => (a as BaselineArea).id)).size === v.areas.length;
 }
 
 /** The saved plan, or null when there is none. */
