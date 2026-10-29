@@ -29281,6 +29281,7 @@ ${USAGE}`);
       const { key, repoPath, link } = connected(values.repo);
       let found = lookupCard(key, id);
       let localId;
+      let siteAnchor;
       if ("missing" in found && link) {
         const site = await withSite(key, link, deps, (remote) => findSiteCard(remote, link.deckId, id));
         if (!site) return noCard(id);
@@ -29288,6 +29289,7 @@ ${USAGE}`);
         if (!match) return fail(`card ${id} has no card file in this repository`);
         found = { card: match };
         localId = match.id;
+        siteAnchor = site.repoCard?.status;
       }
       if ("missing" in found) return noCard(id);
       if ("reason" in found) return fail(`card ${id} can't be read: ${found.reason}`);
@@ -29305,10 +29307,12 @@ ${USAGE}`);
       }
       const symbolFound = a.symbol !== null && at.content !== null && !at.symbolMissing;
       const out = {
+        // For a site id, the site's curation and anchor status: the site holds them once linked, and it only
+        // lists kept cards (get_due_cards and get_deck), while the local file may still say draft.
         id,
         ...localId ? { localId } : {},
-        status: card.status,
-        anchor: a.status,
+        status: localId ? "kept" : card.status,
+        anchor: siteAnchor ?? a.status,
         path: a.path,
         startLine: a.startLine,
         endLine: a.endLine,

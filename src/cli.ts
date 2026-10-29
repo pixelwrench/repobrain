@@ -900,6 +900,7 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
       const { key, repoPath, link } = connected(values.repo);
       let found = lookupCard(key, id);
       let localId: string | undefined;
+      let siteAnchor: AnchorStatus | undefined;
       if ("missing" in found && link) {
         // A site id, from `due`: the code comes from the local card the site card came from.
         const site = await withSite(key, link, deps, (remote) => findSiteCard(remote, link.deckId, id));
@@ -908,6 +909,7 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
         if (!match) return fail(`card ${id} has no card file in this repository`);
         found = { card: match };
         localId = match.id;
+        siteAnchor = site.repoCard?.status;
       }
       if ("missing" in found) return noCard(id);
       if ("reason" in found) return fail(`card ${id} can't be read: ${found.reason}`);
@@ -925,7 +927,10 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
       }
       const symbolFound = a.symbol !== null && at.content !== null && !at.symbolMissing;
       const out: ShowOutput = {
-        id, ...(localId ? { localId } : {}), status: card.status, anchor: a.status, path: a.path, startLine: a.startLine, endLine: a.endLine,
+        // For a site id, the site's curation and anchor status: the site holds them once linked, and it only
+        // lists kept cards (get_due_cards and get_deck), while the local file may still say draft.
+        id, ...(localId ? { localId } : {}), status: localId ? "kept" : card.status, anchor: siteAnchor ?? a.status,
+        path: a.path, startLine: a.startLine, endLine: a.endLine,
         atHead: { commit: tip.head, startLine, endLine, symbolFound, lines: blockText(at.content, startLine, endLine) },
         atCommit: { commit: a.commit, lines: blockText(fileAt(repoPath, a.commit, a.path), a.startLine, a.endLine) },
       };

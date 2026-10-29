@@ -917,11 +917,15 @@ describe("cli with a repo linked to the site", () => {
     it("shows a site id's code from the local card with the plugin's card id", async () => {
       const [mcqSite] = siteCards();
       const plain = { id: "55555555-5555-4555-8555-555555555555", term: "Not a repo card", definition: "y" };
-      remote = fakeRemote({ answers: { get_due_cards: () => ({ deckId: "deck-1", cards: [{ ...mcqSite, term: "Edited on the site" }, plain] }) } });
+      // Kept on the site (the site only quizzes kept cards), and the site says the code changed.
+      const siteCard = { ...mcqSite, term: "Edited on the site", repoCard: { ...mcqSite.repoCard, status: "changed" } };
+      remote = fakeRemote({ answers: { get_due_cards: () => ({ deckId: "deck-1", cards: [siteCard, plain] }) } });
       expect(await cli("show", plain.id)).toMatchObject({ code: 1, out: { error: expect.stringMatching(/no card file/) } });
       const mcq = byKind("mcq");
+      expect(mcq.status).toBe("draft");
       const shown = (await cli("show", MCQ_ID)).out as ShowOutput;
-      expect(shown).toMatchObject({ id: MCQ_ID, localId: mcq.id, path: "src/ref.ts", startLine: 1, endLine: 5, atHead: { symbolFound: true } });
+      // The site's status and anchor, not the local file's: the site holds curation once linked.
+      expect(shown).toMatchObject({ id: MCQ_ID, localId: mcq.id, status: "kept", anchor: "changed", path: "src/ref.ts", startLine: 1, endLine: 5, atHead: { symbolFound: true } });
       expect(shown.atHead.lines).toBe(FILE.split("\n").slice(0, 5).join("\n"));
       // A plugin id, as week prints, is shown from the local file without asking the site.
       const calls = remote.calls.length;
