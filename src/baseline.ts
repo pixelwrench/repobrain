@@ -215,8 +215,9 @@ export async function planBaseline(key: string, opts: PlanOptions = {}): Promise
     const listed = all.slice(0, MAX_PLAN_FILES);
     const readmePath = readmeOf(all);
     const readmeText = readmePath === null ? null : fileAt(repo.path, commit, readmePath);
-    const excerpt = readmeText === null ? null : Buffer.from(readmeText, "utf8").subarray(0, MAX_README_BYTES).toString("utf8");
-    const readme = excerpt !== null && findSecrets(excerpt).length === 0 ? excerpt : null;
+    // Scan the whole file: a secret cut in half at the limit would slip past a scan of the excerpt.
+    const readme =
+      readmeText === null || findSecrets(readmeText).length > 0 ? null : Buffer.from(readmeText, "utf8").subarray(0, MAX_README_BYTES).toString("utf8");
     const count = (n: number) => n.toLocaleString("en-US");
     const stdin = [
       `Files (${count(listed.length)} of ${count(all.length)}):`,

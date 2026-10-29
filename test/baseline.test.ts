@@ -87,6 +87,18 @@ describe("baseline", () => {
       expect(stdin).not.toContain("TAIL");
     });
 
+    it("leaves out the whole README when a secret starts just before the 8,000-byte cut", async () => {
+      const token = "ghp_" + "a".repeat(36);
+      for (const secret of [AWS_KEY, token]) {
+        commit(repo, { "README.md": "r".repeat(7_994) + " " + secret + "\n" }, "readme");
+        let stdin = "";
+        const out = await plan(async (_p, s) => ((stdin = s), reply(twoAreas)), { force: true });
+        expect(stdin).not.toContain("r".repeat(100));
+        expect(stdin).not.toContain(secret.slice(0, 5));
+        expect(out.sent?.readme).toBeNull();
+      }
+    });
+
     it("returns an existing plan unchanged without calling claude, and re-plans at the head with --force", async () => {
       const first = await planned();
       let called = false;
