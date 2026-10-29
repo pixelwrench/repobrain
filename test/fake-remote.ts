@@ -1,7 +1,7 @@
 import type { CallOptions, Remote } from "../src/remote.js";
 import { RemoteError } from "../src/remote.js";
 import type { SubmitCardsInput } from "../src/sync.js";
-import { toolInputs } from "./site-contract.js";
+import { toolInputs, toolOutputs } from "./site-contract.js";
 
 export interface FakeRemote extends Remote {
   calls: { tool: string; args: Record<string, unknown>; opts?: CallOptions }[];
@@ -46,14 +46,19 @@ export function fakeRemote(opts: FakeRemoteOptions = {}): FakeRemote {
       const failure = opts.fail?.(tool);
       if (failure) throw failure;
       const answer = opts.answers?.[tool];
-      if (answer) return answer(args) as T;
+      if (answer) {
+        const out = answer(args);
+        const checked = toolOutputs[tool]?.safeParse(out);
+        if (checked && !checked.success) throw new Error(`the fake ${tool} answer breaks the site's contract: ${checked.error.message}`);
+        return out as T;
+      }
       if (tool === "get_week") return emptySiteWeek() as T;
       if (tool === "curate_card") return { id: args.id, curation: args.decision === "drop" ? "dropped" : "kept" } as T;
       if (tool === "get_due_cards") return { deckId: args.deckId, cards: [] } as T;
       if (tool === "get_deck") return { id: args.deckId, cardCount: 0, cards: [], nextOffset: null } as T;
       if (tool === "record_quiz_results") {
         const outcomes = args.outcomes as { correct: boolean }[];
-        return { recorded: outcomes.length, correct: outcomes.filter((o) => o.correct).length, streakDays: 1 } as T;
+        return { recorded: outcomes.length, correct: outcomes.filter((o) => o.correct).length, skipped: [], streakDays: 1 } as T;
       }
       if (tool === "link_repo") return { repoId: "repo-1", deckId: "deck-1", created: true } as T;
       if (tool === "submit_cards") {

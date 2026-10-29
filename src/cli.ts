@@ -106,9 +106,9 @@ export interface DueOutput {
   due: DueCard[];
 }
 /**
- * A due card in a linked repo. `id` is the site's card id, which show, answer and grade take. `localId` is
- * the local card with the same question, which gives the anchor; when none matches (the card was edited on
- * the site) it and the anchor fields are null.
+ * A due card in a linked repo. `id` is the site's card id, which show, answer and grade take. The anchor
+ * fields are the site's copy (null for a card that didn't come from this plugin); `localId` and `area` come
+ * from the local card file with the plugin's card id, null when there is none.
  */
 export interface RemoteDueCard {
   id: string;
@@ -132,7 +132,7 @@ export interface GradeOutput {
 /** `grade` in a linked repo: the site schedules the card, and doesn't say when it's next due. */
 export interface RemoteGradeOutput {
   id: string;
-  recorded: boolean;
+  recorded: true;
   site: string;
   remote: true;
 }
@@ -365,7 +365,10 @@ const SITE_TIMEOUT_MS = 30_000;
 const timed = { timeout: SITE_TIMEOUT_MS };
 const LOGIN_HINT = "the site refused this machine's sign-in, or it expired: run repobrain login";
 
-/** A card as the site's get_due_cards and get_deck list it: an mcq's `definition` is its correct choice. */
+/**
+ * A card as the site's get_due_cards and get_deck list it: an mcq's `definition` is its correct choice. A
+ * repo card carries `repoCard`: the plugin's card id and the site's copy of its anchor.
+ */
 interface SiteCard {
   id: string;
   kind?: string;
@@ -373,6 +376,7 @@ interface SiteCard {
   definition: string;
   choices?: string[];
   explanation?: string | null;
+  repoCard?: { id: string; path: string; startLine: number; endLine: number; status: AnchorStatus };
 }
 
 /** `p`, or a network error once `ms` pass first; a Remote that connects after that is closed. */
@@ -453,13 +457,17 @@ async function siteDue(remote: Remote, deckId: string): Promise<SiteCard[]> {
 
 const DECK_PAGE = 200;
 
-/** One of the deck's cards by its site id: from the due cards (where a review's cards are), else the whole deck. */
-async function findSiteCard(remote: Remote, deckId: string, id: string): Promise<SiteCard | null> {
-  const due = (await siteDue(remote, deckId)).find((c) => c.id === id);
+/**
+ * One of the deck's cards by its site id, or with `by: "plugin"` by the plugin's card id: from the due cards
+ * (where a review's cards are), else the whole deck.
+ */
+async function findSiteCard(remote: Remote, deckId: string, id: string, by: "site" | "plugin" = "site"): Promise<SiteCard | null> {
+  const is = (c: SiteCard) => (by === "site" ? c.id === id : c.repoCard?.id === id);
+  const due = (await siteDue(remote, deckId)).find(is);
   if (due) return due;
   for (let offset: number | null = 0, pages = 0; offset !== null && pages < 100; pages++) {
     const res: unknown = await remote.call<unknown>("get_deck", { deckId, offset, limit: DECK_PAGE }, timed);
-    const hit = checkCards("get_deck", res).find((c) => c.id === id);
+    const hit = checkCards("get_deck", res).find(is);
     if (hit) return hit;
     const next: unknown = isObj(res) ? res.nextOffset : null;
     offset = typeof next === "number" && next > offset ? next : null;
@@ -473,15 +481,12 @@ const isMcq = (c: SiteCard): boolean => c.kind === "MULTIPLE_CHOICE";
 const siteQuestion = (c: SiteCard): DueBody =>
   isMcq(c) ? { kind: "mcq", question: c.term, choices: c.choices ?? [] } : { kind: "flashcard", front: c.term };
 
-/** What a card asks, as the site stores it (trimmed), so a site card can be matched to its local file. */
-const questionKey = (q: DueBody): string =>
-  JSON.stringify(q.kind === "mcq" ? ["mcq", q.question.trim(), q.choices.map((c) => c.trim())] : ["flashcard", q.front.trim()]);
-
-/** The local card asking the same question as a site card: a kept one first, then any not dropped. */
-function localMatch(cards: Card[], c: SiteCard): Card | null {
-  const want = questionKey(siteQuestion(c));
-  const same = cards.filter((l) => questionKey(questionOf(l.body)) === want);
-  return same.find((l) => l.status === "kept") ?? same.find((l) => l.status !== "dropped") ?? same[0] ?? null;
+/** The local card a site card came from, by the plugin's card id it carries; null when there's no such file. */
+function localCard(key: string, c: SiteCard): Card | null {
+  const id = c.repoCard?.id;
+  if (!id || !isSafeId(id)) return null;
+  const found = lookupCard(key, id);
+  return "card" in found ? found.card : null;
 }
 
 /** The card body as curate_card takes it (the same shape as a submitted card's body). */
@@ -739,13 +744,14 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
       const { key, link } = connected(values.repo);
       if (link) {
         const site = await withSite(link, deps, (remote) => siteDue(remote, link.deckId));
-        const cards = listCardsReport(key).cards;
         const out: RemoteDueOutput = {
+          // The anchor is the site's copy; the local card file, when there is one, gives the area.
           due: site.slice(0, limit ?? 10).map((c) => {
-            const l = localMatch(cards, c);
+            const l = localCard(key, c);
+            const a = c.repoCard;
             return {
-              id: c.id, localId: l?.id ?? null, area: l?.area ?? null, path: l?.anchor.path ?? null, startLine: l?.anchor.startLine ?? null,
-              endLine: l?.anchor.endLine ?? null, codeChanged: l?.anchor.status === "changed", body: siteQuestion(c),
+              id: c.id, localId: l?.id ?? null, area: l?.area ?? null, path: a?.path ?? null, startLine: a?.startLine ?? null,
+              endLine: a?.endLine ?? null, codeChanged: a !== undefined && a.status !== "fresh", body: siteQuestion(c),
             };
           }),
           site: link.site,
@@ -769,13 +775,19 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
       const { key, link } = connected(values.repo);
       const found = lookupCard(key, id);
       if (link) {
-        // The site schedules a linked repo's reviews, by its own card ids.
-        if (!("missing" in found)) return fail(`${id} is a local card id; this repository is linked to ${link.site}, so grade the id \`repobrain due\` printed`);
+        // The site schedules a linked repo's reviews, by its own card ids: a plugin card id is looked up first.
         return withSite(link, deps, async (remote) => {
-          if (!(await findSiteCard(remote, link.deckId, id))) return noCard(id);
-          const res = await remote.call<unknown>("record_quiz_results", { deckId: link.deckId, outcomes: [{ cardId: id, correct: grade === "right" }] }, timed);
-          const recorded = isObj(res) && typeof res.recorded === "number" && res.recorded > 0;
-          return ok({ id, recorded, site: link.site, remote: true } satisfies RemoteGradeOutput);
+          let cardId = id;
+          if (!("missing" in found)) {
+            const site = await findSiteCard(remote, link.deckId, id, "plugin");
+            if (!site) return fail(`no card ${id} on the site`);
+            cardId = site.id;
+          }
+          const res = await remote.call<unknown>("record_quiz_results", { deckId: link.deckId, outcomes: [{ cardId, correct: grade === "right" }] }, timed);
+          if (!isObj(res) || typeof res.recorded !== "number" || !Array.isArray(res.skipped)) throw new RemoteError("record_quiz_results returned an unexpected result", "tool");
+          // The site skips cards it doesn't study (unknown ids, drafts, dropped cards) without failing.
+          if (res.skipped.includes(cardId) || res.recorded === 0) return fail(`card ${id} isn't studied on the site: it may be a draft or dropped`);
+          return ok({ id, recorded: true, site: link.site, remote: true } satisfies RemoteGradeOutput);
         });
       }
       if ("missing" in found) return noCard(id);
@@ -821,11 +833,11 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
       let found = lookupCard(key, id);
       let localId: string | undefined;
       if ("missing" in found && link) {
-        // A site id, from `due`: the code comes from the local card asking the same question.
+        // A site id, from `due`: the code comes from the local card the site card came from.
         const site = await withSite(link, deps, (remote) => findSiteCard(remote, link.deckId, id));
         if (!site) return noCard(id);
-        const match = localMatch(listCardsReport(key).cards, site);
-        if (!match) return fail(`card ${id} matches no card file in this repository; it may have been edited on the site`);
+        const match = localCard(key, site);
+        if (!match) return fail(`card ${id} has no card file in this repository`);
         found = { card: match };
         localId = match.id;
       }

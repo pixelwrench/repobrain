@@ -79,3 +79,26 @@ export const toolInputs: Record<string, z.ZodType> = {
   get_deck: getDeckInput.strict(),
   record_quiz_results: recordQuizResultsInput.extend({ outcomes: z.array(recordQuizResultsInput.shape.outcomes.element.strict()).min(1).max(500) }).strict(),
 };
+
+// ---- Outputs: what the site's quiz tools return (cardForMcp in web/src/server/mcp/tools.ts). ----
+
+/** A repo card's link back to the plugin: its card id and the site's copy of its anchor. */
+const repoCard = z.object({ id: submittedCard.shape.id, path: z.string(), startLine: z.number().int(), endLine: z.number().int(), status: anchor.shape.status }).strict();
+
+export const mcpCard = z.union([
+  z.object({
+    id: z.string(), kind: z.literal("MULTIPLE_CHOICE"), term: z.string(), definition: z.string(), choices: z.array(z.string()),
+    explanation: z.string().nullable(), repoCard: repoCard.optional(),
+  }).strict(),
+  z.object({ id: z.string(), term: z.string(), definition: z.string(), repoCard: repoCard.optional() }).strict(),
+]);
+
+/** Each tool's output, where the plugin reads it, so a fake answer the site couldn't give fails a test. */
+export const toolOutputs: Record<string, z.ZodType> = {
+  get_due_cards: z.union([
+    z.object({ deckId: z.string(), cards: z.array(mcpCard) }),
+    z.object({ deckId: z.string(), locked: z.literal(true), message: z.string(), cards: z.array(mcpCard).max(0) }),
+  ]),
+  get_deck: z.object({ id: z.string(), cards: z.array(mcpCard), nextOffset: z.number().int().nullable() }),
+  record_quiz_results: z.object({ recorded: z.number().int(), correct: z.number().int(), skipped: z.array(z.string()), streakDays: z.number().int() }).strict(),
+};

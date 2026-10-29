@@ -28862,12 +28862,13 @@ async function siteDue(remote, deckId) {
   return checkCards("get_due_cards", res);
 }
 var DECK_PAGE = 200;
-async function findSiteCard(remote, deckId, id) {
-  const due = (await siteDue(remote, deckId)).find((c) => c.id === id);
+async function findSiteCard(remote, deckId, id, by = "site") {
+  const is = (c) => by === "site" ? c.id === id : c.repoCard?.id === id;
+  const due = (await siteDue(remote, deckId)).find(is);
   if (due) return due;
   for (let offset = 0, pages = 0; offset !== null && pages < 100; pages++) {
     const res = await remote.call("get_deck", { deckId, offset, limit: DECK_PAGE }, timed);
-    const hit = checkCards("get_deck", res).find((c) => c.id === id);
+    const hit = checkCards("get_deck", res).find(is);
     if (hit) return hit;
     const next = isObj(res) ? res.nextOffset : null;
     offset = typeof next === "number" && next > offset ? next : null;
@@ -28876,11 +28877,11 @@ async function findSiteCard(remote, deckId, id) {
 }
 var isMcq = (c) => c.kind === "MULTIPLE_CHOICE";
 var siteQuestion = (c) => isMcq(c) ? { kind: "mcq", question: c.term, choices: c.choices ?? [] } : { kind: "flashcard", front: c.term };
-var questionKey = (q) => JSON.stringify(q.kind === "mcq" ? ["mcq", q.question.trim(), q.choices.map((c) => c.trim())] : ["flashcard", q.front.trim()]);
-function localMatch(cards, c) {
-  const want = questionKey(siteQuestion(c));
-  const same = cards.filter((l) => questionKey(questionOf(l.body)) === want);
-  return same.find((l) => l.status === "kept") ?? same.find((l) => l.status !== "dropped") ?? same[0] ?? null;
+function localCard(key, c) {
+  const id = c.repoCard?.id;
+  if (!id || !isSafeId(id)) return null;
+  const found = lookupCard(key, id);
+  return "card" in found ? found.card : null;
 }
 var siteBody = (b) => b.kind === "mcq" ? { kind: "mcq", question: b.question, choices: b.choices, correctChoice: b.correctChoice, explanation: b.explanation } : { kind: "flashcard", front: b.front, back: b.back };
 async function curateOnSite(remote, key, id, decision, body) {
@@ -29131,18 +29132,19 @@ ${USAGE}`);
       const { key, link } = connected(values.repo);
       if (link) {
         const site = await withSite(link, deps, (remote) => siteDue(remote, link.deckId));
-        const cards = listCardsReport(key).cards;
         const out2 = {
+          // The anchor is the site's copy; the local card file, when there is one, gives the area.
           due: site.slice(0, limit ?? 10).map((c) => {
-            const l = localMatch(cards, c);
+            const l = localCard(key, c);
+            const a = c.repoCard;
             return {
               id: c.id,
               localId: l?.id ?? null,
               area: l?.area ?? null,
-              path: l?.anchor.path ?? null,
-              startLine: l?.anchor.startLine ?? null,
-              endLine: l?.anchor.endLine ?? null,
-              codeChanged: l?.anchor.status === "changed",
+              path: a?.path ?? null,
+              startLine: a?.startLine ?? null,
+              endLine: a?.endLine ?? null,
+              codeChanged: a !== void 0 && a.status !== "fresh",
               body: siteQuestion(c)
             };
           }),
@@ -29172,12 +29174,17 @@ ${USAGE}`);
       const { key, link } = connected(values.repo);
       const found = lookupCard(key, id);
       if (link) {
-        if (!("missing" in found)) return fail(`${id} is a local card id; this repository is linked to ${link.site}, so grade the id \`repobrain due\` printed`);
         return withSite(link, deps, async (remote) => {
-          if (!await findSiteCard(remote, link.deckId, id)) return noCard(id);
-          const res = await remote.call("record_quiz_results", { deckId: link.deckId, outcomes: [{ cardId: id, correct: grade === "right" }] }, timed);
-          const recorded = isObj(res) && typeof res.recorded === "number" && res.recorded > 0;
-          return ok({ id, recorded, site: link.site, remote: true });
+          let cardId = id;
+          if (!("missing" in found)) {
+            const site = await findSiteCard(remote, link.deckId, id, "plugin");
+            if (!site) return fail(`no card ${id} on the site`);
+            cardId = site.id;
+          }
+          const res = await remote.call("record_quiz_results", { deckId: link.deckId, outcomes: [{ cardId, correct: grade === "right" }] }, timed);
+          if (!isObj(res) || typeof res.recorded !== "number" || !Array.isArray(res.skipped)) throw new RemoteError("record_quiz_results returned an unexpected result", "tool");
+          if (res.skipped.includes(cardId) || res.recorded === 0) return fail(`card ${id} isn't studied on the site: it may be a draft or dropped`);
+          return ok({ id, recorded: true, site: link.site, remote: true });
         });
       }
       if ("missing" in found) return noCard(id);
@@ -29231,8 +29238,8 @@ ${USAGE}`);
       if ("missing" in found && link) {
         const site = await withSite(link, deps, (remote) => findSiteCard(remote, link.deckId, id));
         if (!site) return noCard(id);
-        const match = localMatch(listCardsReport(key).cards, site);
-        if (!match) return fail(`card ${id} matches no card file in this repository; it may have been edited on the site`);
+        const match = localCard(key, site);
+        if (!match) return fail(`card ${id} has no card file in this repository`);
         found = { card: match };
         localId = match.id;
       }

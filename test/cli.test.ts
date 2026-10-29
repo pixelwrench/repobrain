@@ -666,12 +666,15 @@ describe("cli with a repo linked to the site", () => {
   const cli = (...argv: string[]) => main([...argv, "--repo", repo], { now, run, connect: async () => (connects++, remote) });
   const byKind = (kind: string): Card => listCards(key).find((c) => c.body.kind === kind)!;
   /** The site's copies of the local cards, as get_due_cards and get_deck list them. */
+  /** The site's copies of the local cards, as get_due_cards and get_deck list them, with the site's anchor. */
   const siteCards = () => {
-    const mcq = byKind("mcq").body as Extract<Card["body"], { kind: "mcq" }>;
-    const flash = byKind("flashcard").body as Extract<Card["body"], { kind: "flashcard" }>;
+    const [mcqCard, flashCard] = [byKind("mcq"), byKind("flashcard")];
+    const mcq = mcqCard.body as Extract<Card["body"], { kind: "mcq" }>;
+    const flash = flashCard.body as Extract<Card["body"], { kind: "flashcard" }>;
+    const repoCard = (c: Card) => ({ id: c.id, path: c.anchor.path, startLine: c.anchor.startLine, endLine: c.anchor.endLine, status: c.anchor.status });
     return [
-      { id: MCQ_ID, kind: "MULTIPLE_CHOICE", term: mcq.question, definition: mcq.choices[mcq.correctChoice], choices: mcq.choices, explanation: mcq.explanation },
-      { id: FLASH_ID, term: flash.front, definition: flash.back },
+      { id: MCQ_ID, kind: "MULTIPLE_CHOICE", term: mcq.question, definition: mcq.choices[mcq.correctChoice], choices: mcq.choices, explanation: mcq.explanation, repoCard: repoCard(mcqCard) },
+      { id: FLASH_ID, term: flash.front, definition: flash.back, repoCard: repoCard(flashCard) },
     ];
   };
 
@@ -777,13 +780,15 @@ describe("cli with a repo linked to the site", () => {
   });
 
   describe("review", () => {
-    it("lists the site's due cards by their site ids, with the local card's anchor", async () => {
+    it("lists the site's due cards by their site ids, with the site's anchor and the plugin's card id", async () => {
       const [mcqSite, flashSite] = siteCards();
-      const stray = { id: "33333333-3333-4333-8333-333333333333", term: "Edited on the site", definition: "so no local copy matches" };
-      remote = fakeRemote({ answers: { get_due_cards: () => ({ deckId: "deck-1", cards: [mcqSite, flashSite, stray] }) } });
+      // The site's anchor wins: it says the code changed, and the text there differs from the local file.
+      const flashChanged = { ...flashSite, term: "Edited on the site", repoCard: { ...flashSite.repoCard, startLine: 3, status: "changed" } };
+      const gone = { id: "33333333-3333-4333-8333-333333333333", term: "No local file", definition: "x", repoCard: { id: "gone-1", path: "lib/x.ts", startLine: 7, endLine: 9, status: "orphaned" } };
+      const plain = { id: "55555555-5555-4555-8555-555555555555", term: "Not a repo card", definition: "y" };
+      remote = fakeRemote({ answers: { get_due_cards: () => ({ deckId: "deck-1", cards: [mcqSite, flashChanged, gone, plain] }) } });
       const mcq = byKind("mcq");
       if (mcq.body.kind !== "mcq") throw new Error("not mcq");
-      writeCard(key, { ...readCard(key, byKind("flashcard").id), anchor: { ...byKind("flashcard").anchor, status: "changed" } });
       const r = await cli("due", "--limit", "5");
       expect(r).toEqual({
         code: 0,
@@ -791,8 +796,9 @@ describe("cli with a repo linked to the site", () => {
           site: SITE, remote: true,
           due: [
             { id: MCQ_ID, localId: mcq.id, area: "src", path: "src/ref.ts", startLine: 1, endLine: 5, codeChanged: false, body: { kind: "mcq", question: mcq.body.question, choices: mcq.body.choices } },
-            { id: FLASH_ID, localId: byKind("flashcard").id, area: "src", path: "src/ref.ts", startLine: 2, endLine: 4, codeChanged: true, body: { kind: "flashcard", front: (byKind("flashcard").body as { front: string }).front } },
-            { id: stray.id, localId: null, area: null, path: null, startLine: null, endLine: null, codeChanged: false, body: { kind: "flashcard", front: "Edited on the site" } },
+            { id: FLASH_ID, localId: byKind("flashcard").id, area: "src", path: "src/ref.ts", startLine: 3, endLine: 4, codeChanged: true, body: { kind: "flashcard", front: "Edited on the site" } },
+            { id: gone.id, localId: null, area: null, path: "lib/x.ts", startLine: 7, endLine: 9, codeChanged: true, body: { kind: "flashcard", front: "No local file" } },
+            { id: plain.id, localId: null, area: null, path: null, startLine: null, endLine: null, codeChanged: false, body: { kind: "flashcard", front: "Not a repo card" } },
           ],
         },
       });
@@ -817,8 +823,11 @@ describe("cli with a repo linked to the site", () => {
       expect(await cli("answer", "44444444-4444-4444-8444-444444444444")).toEqual({ code: 1, out: { error: "no card 44444444-4444-4444-8444-444444444444 in this repository" } });
     });
 
-    it("shows a site id's code from the matching local card", async () => {
-      remote = fakeRemote({ answers: { get_due_cards: () => ({ deckId: "deck-1", cards: siteCards() }) } });
+    it("shows a site id's code from the local card with the plugin's card id", async () => {
+      const [mcqSite] = siteCards();
+      const plain = { id: "55555555-5555-4555-8555-555555555555", term: "Not a repo card", definition: "y" };
+      remote = fakeRemote({ answers: { get_due_cards: () => ({ deckId: "deck-1", cards: [{ ...mcqSite, term: "Edited on the site" }, plain] }) } });
+      expect(await cli("show", plain.id)).toMatchObject({ code: 1, out: { error: expect.stringMatching(/no card file/) } });
       const mcq = byKind("mcq");
       const shown = (await cli("show", MCQ_ID)).out as ShowOutput;
       expect(shown).toMatchObject({ id: MCQ_ID, localId: mcq.id, path: "src/ref.ts", startLine: 1, endLine: 5, atHead: { symbolFound: true } });
@@ -829,11 +838,11 @@ describe("cli with a repo linked to the site", () => {
       expect(remote.calls.length).toBe(calls);
     });
 
-    it("records grades on the site", async () => {
-      remote = fakeRemote({ answers: { get_due_cards: () => ({ deckId: "deck-1", cards: siteCards() }) } });
+    it("records grades on the site by site id, without looking the card up first", async () => {
       expect(await cli("grade", MCQ_ID, "right")).toEqual({ code: 0, out: { id: MCQ_ID, recorded: true, site: SITE, remote: true } });
       await cli("grade", FLASH_ID, "didnt-know");
       await cli("grade", MCQ_ID, "wrong");
+      expect(remote.calls.map((c) => c.tool)).toEqual(["record_quiz_results", "record_quiz_results", "record_quiz_results"]);
       expect(callsTo(remote, "record_quiz_results")).toEqual([
         { deckId: "deck-1", outcomes: [{ cardId: MCQ_ID, correct: true }] },
         { deckId: "deck-1", outcomes: [{ cardId: FLASH_ID, correct: false }] },
@@ -843,11 +852,27 @@ describe("cli with a repo linked to the site", () => {
       expect(readJsonl(key, "reviews.jsonl")).toEqual([]);
     });
 
-    it("refuses to grade a plugin id or a card the site doesn't have", async () => {
-      const mcq = byKind("mcq");
-      expect(await cli("grade", mcq.id, "right")).toMatchObject({ code: 1, out: { error: expect.stringMatching(/repobrain due/) } });
-      expect(await cli("grade", "44444444-4444-4444-8444-444444444444", "right")).toMatchObject({ code: 1, out: { error: expect.stringMatching(/^no card/) } });
-      expect(callsTo(remote, "record_quiz_results")).toEqual([]);
+    it("grades a plugin card id as the site card carrying it", async () => {
+      const [mcqSite, flashSite] = siteCards();
+      remote = fakeRemote({
+        answers: {
+          get_due_cards: () => ({ deckId: "deck-1", cards: [mcqSite] }),
+          get_deck: () => ({ id: "deck-1", cardCount: 2, cards: [mcqSite, flashSite], nextOffset: null }),
+        },
+      });
+      const flash = byKind("flashcard");
+      expect(await cli("grade", flash.id, "right")).toEqual({ code: 0, out: { id: flash.id, recorded: true, site: SITE, remote: true } });
+      expect(callsTo(remote, "record_quiz_results")).toEqual([{ deckId: "deck-1", outcomes: [{ cardId: FLASH_ID, correct: true }] }]);
+      // A plugin id the site has no card for.
+      writeCard(key, { ...flash, id: "late-1" });
+      expect(await cli("grade", "late-1", "right")).toEqual({ code: 1, out: { error: "no card late-1 on the site" } });
+    });
+
+    it("says so when the site doesn't record the grade", async () => {
+      remote = fakeRemote({ answers: { record_quiz_results: () => ({ recorded: 0, correct: 0, skipped: [MCQ_ID], streakDays: 0 }) } });
+      expect(await cli("grade", MCQ_ID, "right")).toEqual({
+        code: 1, out: { error: `card ${MCQ_ID} isn't studied on the site: it may be a draft or dropped` },
+      });
     });
 
     it("keeps stats local", async () => {
