@@ -5,10 +5,16 @@ import {
 import { FileOAuthProvider, lockedAuthProvider } from "./auth.js";
 import { VERSION } from "./version.js";
 
+/** A call's abort signal, and its timeout in ms (the SDK's default otherwise). */
+export interface CallOptions {
+  signal?: AbortSignal;
+  timeout?: number;
+}
+
 /** The site's tools, called over MCP with the user's stored OAuth tokens. */
 export interface Remote {
   /** Calls a tool and parses the JSON text the site returns in its first content item. */
-  call<T>(tool: string, args: Record<string, unknown>): Promise<T>;
+  call<T>(tool: string, args: Record<string, unknown>, opts?: CallOptions): Promise<T>;
   close(): Promise<void>;
 }
 
@@ -77,10 +83,15 @@ function firstText(result: { content?: unknown }): string | null {
  * speaks Streamable HTTP, signing requests with `authProvider`, by default the tokens `repobrain login` stored.
  * Token refreshes run under the auth.json lock (see `lockedAuthProvider`).
  */
-export async function connectRemote(site: string, deps: { transport?: Transport; authProvider?: OAuthClientProvider } = {}): Promise<Remote> {
-  const transport =
-    deps.transport ??
-    new StreamableHTTPClientTransport(mcpUrl(site), { authProvider: lockedAuthProvider(deps.authProvider ?? new FileOAuthProvider(site)) });
+export async function connectRemote(
+  site: string,
+  deps: { transport?: Transport; authProvider?: OAuthClientProvider; refreshTimeoutMs?: number; lockWaitMs?: number } = {},
+): Promise<Remote> {
+  const authProvider = lockedAuthProvider(deps.authProvider ?? new FileOAuthProvider(site), {
+    refreshTimeoutMs: deps.refreshTimeoutMs,
+    lockWaitMs: deps.lockWaitMs,
+  });
+  const transport = deps.transport ?? new StreamableHTTPClientTransport(mcpUrl(site), { authProvider });
   const client = new Client(CLIENT_INFO);
   try {
     await client.connect(transport);
@@ -89,10 +100,10 @@ export async function connectRemote(site: string, deps: { transport?: Transport;
     throw toRemoteError(e, "auth");
   }
   return {
-    async call<T>(tool: string, args: Record<string, unknown>): Promise<T> {
+    async call<T>(tool: string, args: Record<string, unknown>, opts?: CallOptions): Promise<T> {
       let result;
       try {
-        result = await client.callTool({ name: tool, arguments: args });
+        result = await client.callTool({ name: tool, arguments: args }, opts);
       } catch (e) {
         throw toRemoteError(e);
       }

@@ -25002,7 +25002,11 @@ function firstText(result) {
   return first?.type === "text" && typeof first.text === "string" ? first.text : null;
 }
 async function connectRemote(site, deps = {}) {
-  const transport = deps.transport ?? new StreamableHTTPClientTransport(mcpUrl(site), { authProvider: lockedAuthProvider(deps.authProvider ?? new FileOAuthProvider(site)) });
+  const authProvider = lockedAuthProvider(deps.authProvider ?? new FileOAuthProvider(site), {
+    refreshTimeoutMs: deps.refreshTimeoutMs,
+    lockWaitMs: deps.lockWaitMs
+  });
+  const transport = deps.transport ?? new StreamableHTTPClientTransport(mcpUrl(site), { authProvider });
   const client = new Client(CLIENT_INFO);
   try {
     await client.connect(transport);
@@ -25012,10 +25016,10 @@ async function connectRemote(site, deps = {}) {
     throw toRemoteError(e, "auth");
   }
   return {
-    async call(tool, args) {
+    async call(tool, args, opts) {
       let result;
       try {
-        result = await client.callTool({ name: tool, arguments: args });
+        result = await client.callTool({ name: tool, arguments: args }, opts);
       } catch (e) {
         throw toRemoteError(e);
       }
@@ -25434,6 +25438,7 @@ function writeAuthFile(data) {
 var LOCK_WAIT_MS = 1e4;
 var REFRESH_LOCK_WAIT_MS = 6e4;
 var LOCK_STALE_MS = 3e4;
+var REFRESH_TIMEOUT_MS = 2e4;
 var pause = new Int32Array(new SharedArrayBuffer(4));
 var heldForRefresh = false;
 var refreshQueue = Promise.resolve();
@@ -25453,14 +25458,14 @@ function withAuthLock(fn) {
     lock.release();
   }
 }
-function withAuthLockAsync(fn) {
+function withAuthLockAsync(fn, waitMs = REFRESH_LOCK_WAIT_MS) {
   const run2 = async () => {
     fs3.mkdirSync(home(), { recursive: true, mode: 448 });
     const file = `${authPath()}.lock`;
-    const deadline = Date.now() + REFRESH_LOCK_WAIT_MS;
+    const deadline = Date.now() + waitMs;
     let lock = acquireFileLock(file, LOCK_STALE_MS);
     while (!lock) {
-      if (Date.now() > deadline) throw new Error(`${authPath()} is locked by another repobrain process; try again`);
+      if (Date.now() > deadline) throw new RemoteError(`${authPath()} is busy with another repobrain process's sign-in; try again`, "network");
       await new Promise((resolve) => setTimeout(resolve, 20 + Math.random() * 30));
       lock = acquireFileLock(file, LOCK_STALE_MS);
     }
@@ -25578,7 +25583,8 @@ var FileOAuthProvider = class {
     if (scope === "all" || scope === "discovery") this.discovery = void 0;
   }
 };
-function lockedAuthProvider(provider) {
+function lockedAuthProvider(provider, opts = {}) {
+  const timeoutMs = opts.refreshTimeoutMs ?? REFRESH_TIMEOUT_MS;
   let sent;
   return {
     async token() {
@@ -25589,10 +25595,25 @@ function lockedAuthProvider(provider) {
       await withAuthLockAsync(async () => {
         const stored = (await provider.tokens())?.access_token;
         if (stored !== void 0 && stored !== sent) return;
+        let timedOut = false;
+        const fetchFn = (url2, init) => {
+          const timeout = AbortSignal.timeout(timeoutMs);
+          const signal = init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout;
+          return ctx.fetchFn(url2, { ...init, signal }).catch((e) => {
+            if (timeout.aborted) timedOut = true;
+            throw e;
+          });
+        };
+        const timeoutError = () => new RemoteError(`the site's sign-in server didn't answer within ${Math.round(timeoutMs / 1e3)}s`, "network");
         const { resourceMetadataUrl, scope } = extractWWWAuthenticateParams(ctx.response);
-        const result = await auth(provider, { serverUrl: ctx.serverUrl, resourceMetadataUrl, scope, fetchFn: ctx.fetchFn });
-        if (result !== "AUTHORIZED") throw new UnauthorizedError();
-      });
+        let result;
+        try {
+          result = await auth(provider, { serverUrl: ctx.serverUrl, resourceMetadataUrl, scope, fetchFn });
+        } catch (e) {
+          throw timedOut ? timeoutError() : e;
+        }
+        if (result !== "AUTHORIZED") throw timedOut ? timeoutError() : new UnauthorizedError();
+      }, opts.lockWaitMs);
     }
   };
 }

@@ -6,10 +6,10 @@ import type { AddressInfo } from "node:net";
 import path from "node:path";
 import {
   auth, extractWWWAuthenticateParams, UnauthorizedError,
-  type AuthProvider, type AuthResult, type OAuthClientMetadata, type OAuthClientProvider, type OAuthDiscoveryState,
+  type AuthProvider, type AuthResult, type FetchLike, type OAuthClientMetadata, type OAuthClientProvider, type OAuthDiscoveryState,
   type StoredOAuthClientInformation, type StoredOAuthTokens,
 } from "@modelcontextprotocol/client";
-import { connectRemote, mcpUrl, toRemoteError, type Remote } from "./remote.js";
+import { connectRemote, mcpUrl, RemoteError, toRemoteError, type Remote } from "./remote.js";
 import { acquireFileLock, home, readJson, writeFileAtomic } from "./store.js";
 
 export const DEFAULT_SITE = "https://repobrain.com";
@@ -73,6 +73,8 @@ const LOCK_WAIT_MS = 10_000;
 /** A token refresh holds the lock across a round trip to the site, so waiting for one allows longer. */
 const REFRESH_LOCK_WAIT_MS = 60_000;
 const LOCK_STALE_MS = 30_000;
+/** How long each request of a token refresh may take. */
+export const REFRESH_TIMEOUT_MS = 20_000;
 const pause = new Int32Array(new SharedArrayBuffer(4));
 /** Set while this process holds the lock for a refresh, whose own auth.json writes then run inside it. */
 let heldForRefresh = false;
@@ -105,14 +107,15 @@ function withAuthLock<T>(fn: () => T): T {
  * Runs `fn` holding the auth.json lock throughout, waiting without blocking: a token refresh, from reading the
  * stored refresh token to saving the rotated one, so no two processes ever redeem the same refresh token.
  */
-function withAuthLockAsync<T>(fn: () => Promise<T>): Promise<T> {
+function withAuthLockAsync<T>(fn: () => Promise<T>, waitMs = REFRESH_LOCK_WAIT_MS): Promise<T> {
   const run = async (): Promise<T> => {
     fs.mkdirSync(home(), { recursive: true, mode: 0o700 });
     const file = `${authPath()}.lock`;
-    const deadline = Date.now() + REFRESH_LOCK_WAIT_MS;
+    const deadline = Date.now() + waitMs;
     let lock = acquireFileLock(file, LOCK_STALE_MS);
     while (!lock) {
-      if (Date.now() > deadline) throw new Error(`${authPath()} is locked by another repobrain process; try again`);
+      // Busy, not refused: a network-kind error, so the sign-in isn't marked expired.
+      if (Date.now() > deadline) throw new RemoteError(`${authPath()} is busy with another repobrain process's sign-in; try again`, "network");
       await new Promise((resolve) => setTimeout(resolve, 20 + Math.random() * 30));
       lock = acquireFileLock(file, LOCK_STALE_MS);
     }
@@ -265,7 +268,8 @@ export class FileOAuthProvider implements OAuthClientProvider {
  * captures would redeem the same refresh token, and with rotation the loser's `invalid_grant` would make the
  * SDK delete the winner's new tokens, signing the user out.
  */
-export function lockedAuthProvider(provider: OAuthClientProvider): AuthProvider {
+export function lockedAuthProvider(provider: OAuthClientProvider, opts: { refreshTimeoutMs?: number; lockWaitMs?: number } = {}): AuthProvider {
+  const timeoutMs = opts.refreshTimeoutMs ?? REFRESH_TIMEOUT_MS;
   let sent: string | undefined;
   return {
     async token() {
@@ -276,10 +280,27 @@ export function lockedAuthProvider(provider: OAuthClientProvider): AuthProvider 
       await withAuthLockAsync(async () => {
         const stored = (await provider.tokens())?.access_token;
         if (stored !== undefined && stored !== sent) return; // refreshed by another process: retry with it
+        // Every request of the refresh gets a deadline, so a site that never answers can't hold the lock.
+        let timedOut = false;
+        const fetchFn: FetchLike = (url, init) => {
+          const timeout = AbortSignal.timeout(timeoutMs);
+          const signal = init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout;
+          return ctx.fetchFn(url, { ...init, signal }).catch((e: unknown) => {
+            if (timeout.aborted) timedOut = true;
+            throw e;
+          });
+        };
+        const timeoutError = () => new RemoteError(`the site's sign-in server didn't answer within ${Math.round(timeoutMs / 1000)}s`, "network");
         const { resourceMetadataUrl, scope } = extractWWWAuthenticateParams(ctx.response);
-        const result = await auth(provider, { serverUrl: ctx.serverUrl, resourceMetadataUrl, scope, fetchFn: ctx.fetchFn });
-        if (result !== "AUTHORIZED") throw new UnauthorizedError();
-      });
+        let result: AuthResult;
+        try {
+          result = await auth(provider, { serverUrl: ctx.serverUrl, resourceMetadataUrl, scope, fetchFn });
+        } catch (e) {
+          // The SDK answers a failed refresh by starting a browser sign-in, which fails outside login.
+          throw timedOut ? timeoutError() : e;
+        }
+        if (result !== "AUTHORIZED") throw timedOut ? timeoutError() : new UnauthorizedError();
+      }, opts.lockWaitMs);
     },
   };
 }

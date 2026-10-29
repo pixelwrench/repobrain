@@ -160,6 +160,64 @@ describe("connectRemote with stored tokens", () => {
     expect(stored).toMatchObject({ access_token: FRESH, refresh_token: ROTATED });
   });
 
+  /** Bundles the client so plain node child processes can run it; each run connects and calls one tool. */
+  async function callerProcess(base: string, refreshTimeoutMs?: number) {
+    const out = tempDir("repobrain-remote-bundle-");
+    buildSync({
+      entryPoints: [path.resolve(import.meta.dirname, "../src/remote.ts")],
+      bundle: true, platform: "node", format: "esm", target: "node24", outfile: path.join(out, "remote.mjs"), logLevel: "warning",
+    });
+    const caller = path.join(out, "caller.mjs");
+    fs.writeFileSync(caller, [
+      'import { connectRemote } from "./remote.mjs";',
+      "try {",
+      `  const remote = await connectRemote(process.argv[2], { refreshTimeoutMs: ${refreshTimeoutMs ?? "undefined"} });`,
+      '  await remote.call("list_my_decks", {});',
+      "  await remote.close();",
+      "} catch (e) {",
+      '  process.stderr.write(`${e.kind}: ${e.message}\\n`);',
+      "  process.exit(1);",
+      "}",
+      "",
+    ].join("\n"));
+    return () =>
+      new Promise<{ code: number | null; stderr: string; ms: number }>((resolve) => {
+        const started = Date.now();
+        const child = spawn(process.execPath, [caller, base], { stdio: ["ignore", "inherit", "pipe"] });
+        let stderr = "";
+        child.stderr.on("data", (d) => (stderr += d));
+        child.on("exit", (code) => resolve({ code, stderr, ms: Date.now() - started }));
+      });
+  }
+
+  it("reports a sign-in lock held too long as busy (network), not as an expired sign-in", async () => {
+    site = await startFakeSite({ accept: [FRESH], token: () => ({ status: 200, body: { access_token: FRESH, token_type: "bearer" } }) });
+    await signedIn(site.base);
+    fs.writeFileSync(`${authPath()}.lock`, `${process.pid}:someone-else`);
+    const e = await caught(connectRemote(site.base, { lockWaitMs: 200 }));
+    expect(e.kind).toBe("network");
+    expect(e.message).toMatch(/busy/);
+    expect(site.hits).not.toContain("POST /token refresh_token");
+    fs.rmSync(`${authPath()}.lock`);
+  });
+
+  it("gives up on a token endpoint that never answers, so the lock is never held for long", async () => {
+    site = await startFakeSite({ accept: [FRESH], token: () => new Promise(() => {}) });
+    await signedIn(site.base);
+    const run = await callerProcess(site.base, 500);
+    const first = run();
+    // The second starts once the first holds the lock and waits on the site.
+    while (!site.hits.includes("POST /token refresh_token")) await new Promise((r) => setTimeout(r, 20));
+    const [a, b] = await Promise.all([first, run()]);
+    for (const r of [a, b]) {
+      expect(r.code).toBe(1);
+      expect(r.stderr).toMatch(/^network: /m);
+    }
+    expect(b.ms).toBeLessThan(8_000);
+    // A timeout is no reason to forget the sign-in.
+    expect(JSON.parse(fs.readFileSync(authPath(), "utf8")).sites[site.base].tokens.refresh_token).toBe(REFRESH);
+  }, 60_000);
+
   it("lets processes refreshing at once share one rotation, so none is signed out", async () => {
     // The site rotates refresh tokens and refuses a used one, as a real authorization server may.
     // Each refresh is slow, so without a lock every process would send the same refresh token.
@@ -179,30 +237,8 @@ describe("connectRemote with stored tokens", () => {
       },
     });
     await signedIn(site.base);
-    // Bundle the client so plain node child processes can run it.
-    const out = tempDir("repobrain-remote-bundle-");
-    buildSync({
-      entryPoints: [path.resolve(import.meta.dirname, "../src/remote.ts")],
-      bundle: true, platform: "node", format: "esm", target: "node24", outfile: path.join(out, "remote.mjs"), logLevel: "warning",
-    });
-    const caller = path.join(out, "caller.mjs");
-    fs.writeFileSync(caller, [
-      'import { connectRemote } from "./remote.mjs";',
-      "try {",
-      "  const remote = await connectRemote(process.argv[2]);",
-      '  await remote.call("list_my_decks", {});',
-      "  await remote.close();",
-      "} catch (e) {",
-      '  process.stderr.write(`${e.kind}: ${e.message}\\n`);',
-      "  process.exit(1);",
-      "}",
-      "",
-    ].join("\n"));
-    const run = () =>
-      new Promise<number | null>((resolve) => {
-        spawn(process.execPath, [caller, site.base], { stdio: ["ignore", "inherit", "inherit"] }).on("exit", resolve);
-      });
-    expect(await Promise.all([run(), run(), run()])).toEqual([0, 0, 0]);
+    const run = await callerProcess(site.base);
+    expect((await Promise.all([run(), run(), run()])).map((r) => r.code)).toEqual([0, 0, 0]);
     expect(issued).toBe(1);
     const stored = JSON.parse(fs.readFileSync(authPath(), "utf8")).sites[site.base].tokens;
     expect(stored.refresh_token).toBe(live);
