@@ -85,8 +85,14 @@ export class FileOAuthProvider implements OAuthClientProvider {
 
   constructor(readonly site: string, private readonly interactive?: FileOAuthProviderOptions) {}
 
+  /**
+   * The loopback callback during login. Outside login it is the stored client's registered callback: the SDK
+   * takes a provider with no redirect URL for a client-credentials client and never refreshes its tokens.
+   */
   get redirectUrl(): string | undefined {
-    return this.interactive?.redirectUrl;
+    if (this.interactive) return this.interactive.redirectUrl;
+    const uris = (readAuthFile().sites[this.site]?.clientInformation as { redirect_uris?: unknown } | undefined)?.redirect_uris;
+    return Array.isArray(uris) && typeof uris[0] === "string" ? uris[0] : undefined;
   }
 
   get clientMetadata(): OAuthClientMetadata {
@@ -260,7 +266,7 @@ export async function login(site: string, deps: LoginDeps = {}): Promise<LoginOu
   const flow = deps.authFlow ?? auth;
   // Discovery, registration and the token exchange fail as auth or network errors with a readable message.
   const authFlow: AuthFlow = (provider, options) => flow(provider, options).catch((e: unknown) => {
-    throw toRemoteError(e);
+    throw toRemoteError(e, "auth");
   });
   const openBrowser = deps.openBrowser ?? openInBrowser;
   const notify = deps.notify ?? ((m: string) => process.stderr.write(m + "\n"));

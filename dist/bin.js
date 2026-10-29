@@ -24944,6 +24944,50 @@ var StreamableHTTPClientTransport = class {
   }
 };
 
+// package.json
+var package_default = {
+  name: "repobrain",
+  version: "0.3.0",
+  description: "Remember the code your AI agents write: spaced-repetition cards from merged changes, drafted by your own Claude.",
+  license: "MIT",
+  type: "module",
+  bin: {
+    repobrain: "dist/bin.js"
+  },
+  files: [
+    "dist",
+    ".claude-plugin",
+    "hooks",
+    "commands",
+    "bin"
+  ],
+  os: [
+    "darwin",
+    "linux"
+  ],
+  engines: {
+    node: ">=24"
+  },
+  scripts: {
+    build: "tsc --noEmit -p tsconfig.build.json && rm -rf dist && esbuild src/bin.ts src/hook-bin.ts --bundle --platform=node --format=esm --target=node24 --outdir=dist --log-level=warning",
+    typecheck: "tsc --noEmit",
+    test: "vitest run",
+    "check:dist": "npm run build && git diff --exit-code --stat -- dist"
+  },
+  dependencies: {
+    "@modelcontextprotocol/client": "2.4.0",
+    "ts-fsrs": "6.0.0"
+  },
+  devDependencies: {
+    "@modelcontextprotocol/server": "2.4.0",
+    "@types/node": "^24.19.2",
+    esbuild: "0.28.2",
+    typescript: "^7.0.2",
+    vitest: "^5.0.5",
+    zod: "4.6.7"
+  }
+};
+
 // src/remote.ts
 var RemoteError = class extends Error {
   constructor(message5, kind) {
@@ -24953,12 +24997,33 @@ var RemoteError = class extends Error {
   }
   kind;
 };
-var CLIENT_INFO = { name: "repobrain", version: "0.3.0" };
+var CLIENT_INFO = { name: "repobrain", version: package_default.version };
 function mcpUrl(site) {
   return new URL("api/mcp", site.endsWith("/") ? site : `${site}/`);
 }
 var messageOf = (e) => e instanceof Error ? e.message : String(e);
-function toRemoteError(e) {
+var NETWORK_CODES = /* @__PURE__ */ new Set([
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ENOTFOUND",
+  "ETIMEDOUT",
+  "EAI_AGAIN",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "EPIPE",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_BODY_TIMEOUT",
+  "UND_ERR_SOCKET"
+]);
+function isNetworkFailure(e) {
+  if (!(e instanceof Error)) return false;
+  if (e.name === "AbortError" || e.name === "TimeoutError") return true;
+  if (e instanceof SdkHttpError) return !(e.status > 0) || e.status >= 500;
+  const code = e.cause?.code;
+  return e instanceof TypeError && typeof code === "string" && NETWORK_CODES.has(code);
+}
+function toRemoteError(e, fallback = "tool") {
   if (e instanceof RemoteError) return e;
   if (e instanceof UnauthorizedError || e instanceof OAuthError || e instanceof OAuthClientFlowError) {
     const m = messageOf(e);
@@ -24968,7 +25033,9 @@ function toRemoteError(e) {
     return new RemoteError(`the site refused the sign-in: run repobrain login (${messageOf(e)})`, "auth");
   }
   if (e instanceof ProtocolError) return new RemoteError(messageOf(e), "tool");
-  return new RemoteError(`could not reach the site: ${messageOf(e)}`, "network");
+  if (isNetworkFailure(e)) return new RemoteError(`could not reach the site: ${messageOf(e)}`, "network");
+  if (fallback === "auth") return new RemoteError(`sign-in failed: ${messageOf(e)}; run repobrain login`, "auth");
+  return new RemoteError(messageOf(e), "tool");
 }
 function firstText(result) {
   const first = Array.isArray(result.content) ? result.content[0] : void 0;
@@ -24982,7 +25049,7 @@ async function connectRemote(site, deps = {}) {
   } catch (e) {
     await client.close().catch(() => {
     });
-    throw toRemoteError(e);
+    throw toRemoteError(e, "auth");
   }
   return {
     async call(tool, args) {
@@ -25403,8 +25470,14 @@ var FileOAuthProvider = class {
   verifier;
   discovery;
   stateValue;
+  /**
+   * The loopback callback during login. Outside login it is the stored client's registered callback: the SDK
+   * takes a provider with no redirect URL for a client-credentials client and never refreshes its tokens.
+   */
   get redirectUrl() {
-    return this.interactive?.redirectUrl;
+    if (this.interactive) return this.interactive.redirectUrl;
+    const uris = readAuthFile().sites[this.site]?.clientInformation?.redirect_uris;
+    return Array.isArray(uris) && typeof uris[0] === "string" ? uris[0] : void 0;
   }
   get clientMetadata() {
     return {
@@ -25525,7 +25598,7 @@ async function openInBrowser(url2) {
 async function login(site, deps = {}) {
   const flow = deps.authFlow ?? auth;
   const authFlow = (provider, options) => flow(provider, options).catch((e) => {
-    throw toRemoteError(e);
+    throw toRemoteError(e, "auth");
   });
   const openBrowser = deps.openBrowser ?? openInBrowser;
   const notify = deps.notify ?? ((m) => process.stderr.write(m + "\n"));

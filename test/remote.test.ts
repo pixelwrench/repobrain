@@ -1,10 +1,14 @@
+import fs from "node:fs";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { InMemoryTransport, SdkErrorCode, SdkHttpError, UnauthorizedError } from "@modelcontextprotocol/client";
 import { McpServer } from "@modelcontextprotocol/server";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import * as z from "zod/v4";
-import { connectRemote, RemoteError, toRemoteError, type Remote } from "../src/remote.js";
+import { authPath, FileOAuthProvider } from "../src/auth.js";
+import { CLIENT_INFO, connectRemote, RemoteError, toRemoteError, type Remote } from "../src/remote.js";
+import { startFakeSite, type FakeSite } from "./fake-site.js";
+import { useTempHome } from "./helpers.js";
 
 function testServer(): McpServer {
   const server = new McpServer({ name: "test-site", version: "1.0.0" });
@@ -95,13 +99,84 @@ describe("toRemoteError", () => {
     expect(toRemoteError(new SdkHttpError(SdkErrorCode.ClientHttpAuthentication, "401", { status: 401 })).kind).toBe("auth");
   });
 
-  it("classifies fetch failures and other HTTP errors as network", () => {
-    expect(toRemoteError(new TypeError("fetch failed")).kind).toBe("network");
+  it("classifies connection failures and server errors as network", () => {
+    const refused = new TypeError("fetch failed", { cause: Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }) });
+    expect(toRemoteError(refused).kind).toBe("network");
     expect(toRemoteError(new SdkHttpError(SdkErrorCode.ClientHttpNotImplemented, "502", { status: 502 })).kind).toBe("network");
+    expect(toRemoteError(Object.assign(new Error("aborted"), { name: "AbortError" })).kind).toBe("network");
+  });
+
+  it("doesn't call other failures network ones", () => {
+    expect(toRemoteError(new Error("Either provider.prepareTokenRequest() or authorizationCode is required")).kind).toBe("tool");
+    expect(toRemoteError(new Error("odd"), "auth").kind).toBe("auth");
+    expect(toRemoteError(new TypeError("x is not a function")).kind).toBe("tool");
+    expect(toRemoteError(new SdkHttpError(SdkErrorCode.ClientHttpNotImplemented, "404", { status: 404 })).kind).toBe("tool");
   });
 
   it("keeps a RemoteError as it is", () => {
     const e = new RemoteError("x", "tool");
     expect(toRemoteError(e)).toBe(e);
+  });
+});
+
+describe("connectRemote with stored tokens", () => {
+  // Token-looking values are built by concatenation so secret scanners don't flag the repo.
+  const EXPIRED = "old-" + "access";
+  const FRESH = "new-" + "access";
+  const REFRESH = "rt-" + "one";
+  const ROTATED = "rt-" + "two";
+  let site: FakeSite;
+  beforeEach(() => {
+    useTempHome();
+  });
+  afterEach(async () => {
+    await site?.close();
+  });
+
+  async function signedIn(base: string): Promise<void> {
+    const p = new FileOAuthProvider(base);
+    p.saveClientInformation({ client_id: "c1", redirect_uris: ["http://127.0.0.1:1/callback"] });
+    p.saveTokens({ access_token: EXPIRED, token_type: "bearer", refresh_token: REFRESH });
+  }
+
+  it("refreshes an expired access token without a browser and saves the rotated tokens", async () => {
+    site = await startFakeSite({
+      accept: [FRESH],
+      token: (form) =>
+        form.get("grant_type") === "refresh_token" && form.get("refresh_token") === REFRESH
+          ? { status: 200, body: { access_token: FRESH, token_type: "bearer", refresh_token: ROTATED } }
+          : { status: 400, body: { error: "invalid_grant" } },
+    });
+    await signedIn(site.base);
+    const remote = await connectRemote(site.base);
+    open.push(remote);
+    expect(await remote.call("list_my_decks", {})).toEqual({ ok: true });
+    expect(site.hits).toContain("POST /token refresh_token");
+    const stored = JSON.parse(fs.readFileSync(authPath(), "utf8")).sites[site.base].tokens;
+    expect(stored).toMatchObject({ access_token: FRESH, refresh_token: ROTATED });
+  });
+
+  it("reports a refused refresh token as an auth error that names repobrain login", async () => {
+    site = await startFakeSite({ accept: [FRESH], token: () => ({ status: 400, body: { error: "invalid_grant" } }) });
+    await signedIn(site.base);
+    const e = await caught(connectRemote(site.base));
+    expect(e.kind).toBe("auth");
+    expect(e.message).toMatch(/repobrain login/);
+  });
+
+  it("reports a missing sign-in as an auth error", async () => {
+    site = await startFakeSite({ accept: [FRESH], token: () => ({ status: 400, body: {} }) });
+    const e = await caught(connectRemote(site.base));
+    expect(e.kind).toBe("auth");
+    expect(e.message).toMatch(/repobrain login/);
+  });
+});
+
+describe("CLIENT_INFO", () => {
+  it("carries the package version, which matches the plugin's", () => {
+    const pkg = JSON.parse(fs.readFileSync("package.json", "utf8")) as { version: string };
+    const plugin = JSON.parse(fs.readFileSync(".claude-plugin/plugin.json", "utf8")) as { version: string };
+    expect(CLIENT_INFO).toEqual({ name: "repobrain", version: pkg.version });
+    expect(plugin.version).toBe(pkg.version);
   });
 });
