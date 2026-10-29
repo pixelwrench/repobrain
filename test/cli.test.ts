@@ -973,7 +973,7 @@ describe("cli with a repo linked to the site", () => {
     it("says so when the site doesn't record the grade", async () => {
       remote = fakeRemote({ unstudied: new Set([MCQ_ID]) });
       expect(await cli("grade", MCQ_ID, "right")).toEqual({
-        code: 1, out: { error: `card ${MCQ_ID} isn't studied on the site: it may be a draft or dropped` },
+        code: 1, out: { error: `card ${MCQ_ID} isn't studied on the site: it may be a draft, dropped, or its code was removed` },
       });
       // Nothing recorded counts the same, even with no id listed as skipped.
       remote = fakeRemote({ answers: { record_quiz_results: () => ({ recorded: 0, correct: 0, skipped: [], streakDays: 0 }) } });

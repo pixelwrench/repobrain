@@ -148,13 +148,6 @@ export interface SubmitOptions {
 /** Thrown when a sync's time budget runs out. */
 const outOfTime = (): RemoteError => new RemoteError("the site sync ran out of time", "network");
 
-/**
- * Uploads the cards the site doesn't have as they are now, grouped by merge (and title, since baseline areas
- * share a commit) in batches of {@link BATCH_SIZE}. `state.submitted` and `state.refused` hold each card's
- * {@link cardHash} as sent: a card is sent again only when it changed (or has an old `true` mark). They are
- * saved after each batch, so a failure part way keeps what got through and the rest is retried next time.
- * The caller holds the repo's capture lock.
- */
 /** A card's refusal mark: the hash of the version refused, and why (null for a mark from before reasons were kept). */
 export function refusalOf(state: RepoState, id: string): { hash: string; reason: string | null } | null {
   const mark = state.refused?.[id];
@@ -162,6 +155,13 @@ export function refusalOf(state: RepoState, id: string): { hash: string; reason:
   return typeof mark === "string" ? { hash: mark, reason: null } : { hash: mark.hash, reason: mark.reason };
 }
 
+/**
+ * Uploads the cards the site doesn't have as they are now, grouped by merge (and title, since baseline areas
+ * share a commit) in batches of {@link BATCH_SIZE}. `state.submitted` and `state.refused` hold each card's
+ * {@link cardHash} as sent: a card is sent again only when it changed (or has an old `true` mark). They are
+ * saved after each batch, so a failure part way keeps what got through and the rest is retried next time.
+ * The caller holds the repo's capture lock.
+ */
 export async function submitPending(key: string, remote: Remote, opts: SubmitOptions = {}): Promise<SubmitReport> {
   const report = opts.report ?? { uploaded: 0, rejected: [] };
   const state = readState(key);

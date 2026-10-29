@@ -853,7 +853,7 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
           const res = await remote.call<unknown>("record_quiz_results", { deckId: link.deckId, outcomes: [{ cardId, correct: grade === "right" }] });
           if (!isObj(res) || typeof res.recorded !== "number" || !Array.isArray(res.skipped)) throw new RemoteError("record_quiz_results returned an unexpected result", "tool");
           // The site skips cards it doesn't study (unknown ids, drafts, dropped cards) without failing.
-          if (res.recorded === 0 || res.skipped.length > 0) return fail(`card ${id} isn't studied on the site: it may be a draft or dropped`);
+          if (res.recorded === 0 || res.skipped.length > 0) return fail(`card ${id} isn't studied on the site: it may be a draft, dropped, or its code was removed`);
           return ok({ id, recorded: true, site: link.site, remote: true } satisfies RemoteGradeOutput);
         });
       }
