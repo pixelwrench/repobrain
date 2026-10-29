@@ -1,10 +1,12 @@
+import fs from "node:fs";
+import path from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { FileOAuthProvider } from "../src/auth.js";
 import { main } from "../src/cli.js";
 import type { Card } from "../src/format.js";
 import { RemoteError, type Remote } from "../src/remote.js";
-import { acquireLock, connectRepo, loadConfig, readState, writeCard } from "../src/store.js";
-import { BATCH_SIZE, linkRepo, submitPending, toSubmitted } from "../src/sync.js";
+import { acquireLock, appendLog, connectRepo, loadConfig, readState, repoDir, setRemote, writeCard, writeState } from "../src/store.js";
+import { BATCH_SIZE, cut, linkRepo, submitPending, syncToSite, toSubmitted } from "../src/sync.js";
 import { fakeRemote, submits } from "./fake-remote.js";
 import { commit, makeRepo, useTempHome } from "./helpers.js";
 
@@ -68,17 +70,63 @@ describe("link and submitPending", () => {
     expect(loadConfig().repos[key].remote).toEqual({ site: SITE, repoId: "repo-1", deckId: "deck-1", linkedAt: "2026-11-02T09:00:00.000Z" });
   });
 
-  it("reports rejected cards and doesn't mark them submitted, so they're sent again", async () => {
+  it("reports rejected cards once, and sends one again only after it changes", async () => {
     writeCard(key, makeCard(key, "ok-1"));
     writeCard(key, makeCard(key, "bad-1"));
     const remote = fakeRemote({ reject: new Set(["bad-1"]) });
     const out = await linkRepo(key, repo, SITE, remote);
     expect(out.uploaded).toBe(1);
     expect(out.rejected).toEqual([{ id: "bad-1", reason: "looks like a secret" }]);
-    expect(readState(key).submitted).toEqual({ "ok-1": true });
+    const state = readState(key);
+    expect(Object.keys(state.submitted ?? {})).toEqual(["ok-1"]);
+    expect(Object.keys(state.refused ?? {})).toEqual(["bad-1"]);
     const again = fakeRemote();
+    expect(await submitPending(key, again)).toEqual({ uploaded: 0, rejected: [] });
+    expect(again.calls).toEqual([]);
+    writeCard(key, makeCard(key, "bad-1", { body: { kind: "flashcard", front: "Fixed?", back: "Yes." } }));
     expect(await submitPending(key, again)).toEqual({ uploaded: 1, rejected: [] });
     expect(submits(again).flatMap((b) => b.cards.map((c) => c.id))).toEqual(["bad-1"]);
+    expect(readState(key).refused).toEqual({});
+  });
+
+  it("sends a card again when it changed after upload, and an old-style mark once", async () => {
+    writeCard(key, makeCard(key, "c1"));
+    writeCard(key, makeCard(key, "c2"));
+    await submitPending(key, fakeRemote());
+    expect(readState(key).submitted?.c1).toMatch(/^[0-9a-f]{64}$/);
+    writeCard(key, makeCard(key, "c1", { body: { kind: "flashcard", front: "Re-drafted?", back: "Yes." } }));
+    const state = readState(key);
+    writeState(key, { ...state, submitted: { ...state.submitted, c2: true } });
+    const again = fakeRemote();
+    expect((await submitPending(key, again)).uploaded).toBe(2);
+    expect(submits(again).flatMap((b) => b.cards.map((c) => [c.id, c.body.kind === "flashcard" ? c.body.front : ""]))).toEqual([
+      ["c1", "Re-drafted?"],
+      ["c2", "What does applyReferral return for an unknown code?"],
+    ]);
+    const third = fakeRemote();
+    await submitPending(key, third);
+    expect(third.calls).toEqual([]);
+  });
+
+  it("refreshes the caller's lock after each batch", async () => {
+    for (let i = 0; i < BATCH_SIZE + 1; i++) writeCard(key, makeCard(key, `c-${String(i).padStart(2, "0")}`));
+    let refreshes = 0;
+    await submitPending(key, fakeRemote(), { refresh: () => refreshes++ });
+    expect(refreshes).toBe(2);
+  });
+
+  it("refuses to link a repo whose key is too long for the site", async () => {
+    await expect(linkRepo("x".repeat(81), repo, SITE, fakeRemote())).rejects.toThrow(/folder name is too long for the site/);
+  });
+
+  it("cuts long titles and names without splitting a character", async () => {
+    expect(cut("ab\u{1F600}cd", 3)).toBe("ab");
+    expect(cut("ab\u{1F600}cd", 4)).toBe("ab\u{1F600}");
+    expect(cut("short", 300)).toBe("short");
+    writeCard(key, makeCard(key, "c1", { mergeTitle: "x".repeat(299) + "\u{1F600}" }));
+    const remote = fakeRemote();
+    await submitPending(key, remote);
+    expect(submits(remote)[0].mergeTitle).toBe("x".repeat(299));
   });
 
   it("sends nothing the second time", async () => {
@@ -113,6 +161,27 @@ describe("link and submitPending", () => {
     } finally {
       lock.release();
     }
+  });
+
+  it("stops a sync at its time budget and logs the step it timed out in", async () => {
+    setRemote(key, { site: SITE, repoId: "repo-1", deckId: "deck-1", linkedAt: "2026-11-01T09:00:00.000Z" });
+    new FileOAuthProvider(SITE).saveTokens({ access_token: "at-" + "x", token_type: "bearer" });
+    for (let i = 0; i < BATCH_SIZE + 1; i++) writeCard(key, makeCard(key, `c-${String(i).padStart(2, "0")}`));
+    const slow = fakeRemote({ delayMs: 10_000 });
+    const started = Date.now();
+    expect(await syncToSite(key, { connect: async () => slow, budgetMs: 300 })).toBe(0);
+    expect(Date.now() - started).toBeLessThan(3_000);
+    expect(submits(slow)).toHaveLength(1);
+    expect(fs.readFileSync(path.join(repoDir(key), "capture.log"), "utf8")).toContain("site sync failed (network): timed out during submit_cards");
+    expect(readState(key).remoteAuth).toBeUndefined();
+  });
+
+  it("stops a sync whose connect never finishes", async () => {
+    setRemote(key, { site: SITE, repoId: "repo-1", deckId: "deck-1", linkedAt: "2026-11-01T09:00:00.000Z" });
+    new FileOAuthProvider(SITE).saveTokens({ access_token: "at-" + "x", token_type: "bearer" });
+    appendLog(key, "start");
+    expect(await syncToSite(key, { connect: () => new Promise(() => {}), budgetMs: 200 })).toBe(0);
+    expect(fs.readFileSync(path.join(repoDir(key), "capture.log"), "utf8")).toContain("timed out during connect");
   });
 
   describe("cli", () => {

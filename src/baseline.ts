@@ -445,7 +445,7 @@ export async function draftBaselineArea(key: string, opts: DraftAreaOptions): Pr
     }
     const out = finish("drafted", drafted.costUsd);
     // After the plan is saved: a slow or failing site never holds up the area's outcome.
-    out.uploaded = await syncToSite(key, { connect: opts.connect });
+    out.uploaded = await syncToSite(key, { connect: opts.connect, refresh: lock.refresh });
     return out;
   } finally {
     lock.release();

@@ -34,8 +34,15 @@ export interface RepoState {
   unavailable?: { since: string; message: string };
   /** The last unexpected capture failure (a git error, say); a run that completes clears it. Week and stats show it. */
   lastError?: { at: string; message: string };
-  /** Ids of the cards the linked site has, so a failed upload is retried at the next capture. */
-  submitted?: Record<string, true>;
+  /**
+   * The cards the linked site has, each with the hash of what was sent, so a failed upload is retried and a
+   * card changed since is sent again. `true` (from older versions) means sent, version unknown.
+   */
+  submitted?: Record<string, string | true>;
+  /** Cards the site refused, or that were held back, with the hash of that version: not sent again until changed. */
+  refused?: Record<string, string>;
+  /** A hash of the anchors last pushed with update_anchors, so an unchanged set isn't pushed again. */
+  anchorsPushed?: string;
   /** Set when the site refused the stored sign-in; the next successful upload clears it. */
   remoteAuth?: "expired";
 }

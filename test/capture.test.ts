@@ -6,7 +6,7 @@ import { ClaudeEnvError, ClaudeLimitError, ClaudeResultError, type RunClaude } f
 import { FileOAuthProvider } from "../src/auth.js";
 import { RemoteError } from "../src/remote.js";
 import { acquireLock, cardPath, connectRepo, listCards, readCard, readState, repoDir, setRemote, writeCard, writeState, type RepoState } from "../src/store.js";
-import { fakeRemote, submits, type FakeRemote } from "./fake-remote.js";
+import { anchorPushes, fakeRemote, submits, type FakeRemote } from "./fake-remote.js";
 import { commit, makeRepo, sh, useTempHome } from "./helpers.js";
 
 // Pass-through mocks with hooks, so tests can count calls and act at precise moments.
@@ -771,6 +771,33 @@ describe("runCapture", () => {
       const now = readCard(key, card.id).anchor;
       expect(pushed[0].args).toEqual({ repo: key, anchors: [{ id: card.id, status: "changed", startLine: now.startLine, endLine: now.endLine }] });
       expect(remote.calls.findIndex((c) => c.tool === "submit_cards")).toBeLessThan(remote.calls.findIndex((c) => c.tool === "update_anchors"));
+    });
+
+    it("checks and pushes the anchors of every submitted card not dropped here, drafts included, leaving the files' statuses alone", async () => {
+      await runCapture(key, opts(fake(), linked()));
+      commit(repo, { "src/ref.ts": FILE }, "feat: referral codes");
+      await runCapture(key, opts(fakeTwo(), linked()));
+      expect(anchorPushes(remote)).toHaveLength(1);
+      const [a, b] = listCards(key);
+      writeCard(key, { ...b, status: "dropped" });
+      commit(repo, { "src/ref.ts": FILE.replace("return null", "throw new Error('unknown')") }, "fix: throw");
+      remote = fakeRemote();
+      await runCapture(key, opts(empty, linked()));
+      const pushed = anchorPushes(remote);
+      expect(pushed).toHaveLength(1);
+      expect(pushed[0]).toEqual({ repo: key, anchors: [{ id: a.id, status: "changed", startLine: a.anchor.startLine, endLine: a.anchor.endLine }] });
+      expect(readCard(key, a.id)).toMatchObject({ status: "draft", anchor: { status: "fresh" } });
+      // Nothing changed since: no push.
+      remote = fakeRemote();
+      await runCapture(key, opts(empty, linked()));
+      expect(remote.calls).toEqual([]);
+    });
+
+    it("clears an expired sign-in once the site accepts it, even with nothing to send", async () => {
+      await runCapture(key, opts(fake(), linked()));
+      writeState(key, { ...readState(key), remoteAuth: "expired" });
+      await runCapture(key, opts(empty, linked()));
+      expect(readState(key).remoteAuth).toBeUndefined();
     });
 
     it("doesn't connect without a sign-in, and says the sign-in is needed", async () => {

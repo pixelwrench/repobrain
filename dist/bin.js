@@ -26315,10 +26315,25 @@ function draftCards(input, run2 = runClaude) {
 }
 
 // src/sync.ts
+import { createHash as createHash3 } from "node:crypto";
 import path6 from "node:path";
 var BATCH_SIZE = 20;
 var MAX_TITLE = 300;
 var MAX_NAME = 100;
+var REPO_KEY = /^[A-Za-z0-9._-]{1,80}$/;
+function cut(s, max) {
+  if (s.length <= max) return s;
+  let out = "";
+  for (const ch of s) {
+    if (out.length + ch.length > max) break;
+    out += ch;
+  }
+  return out;
+}
+var titleOf = (card) => cut(card.mergeTitle.trim(), MAX_TITLE) || card.merge;
+function cardHash(card) {
+  return createHash3("sha256").update(JSON.stringify([card.merge, titleOf(card), card.source, toSubmitted(card)])).digest("hex");
+}
 function toSubmitted(card) {
   const a = card.anchor;
   return {
@@ -26359,59 +26374,79 @@ function checkSubmitResult(v) {
   if (!ok2) throw new RemoteError("submit_cards returned an unexpected result", "tool");
   return r;
 }
-async function submitPending(key, remote, report = { uploaded: 0, rejected: [] }) {
+var outOfTime = () => new RemoteError("the site sync ran out of time", "network");
+async function submitPending(key, remote, opts = {}) {
+  const report = opts.report ?? { uploaded: 0, rejected: [] };
   const state = readState(key);
   const submitted = state.submitted ??= {};
+  const refused = state.refused ??= {};
   const groups = /* @__PURE__ */ new Map();
+  let heldBack = false;
   for (const card of listCards(key)) {
-    if (submitted[card.id]) continue;
+    const hash = cardHash(card);
+    if (submitted[card.id] === hash || refused[card.id] === hash) continue;
     const why = unsendable(card);
     if (why) {
+      refused[card.id] = hash;
       report.rejected.push({ id: card.id, reason: why });
+      heldBack = true;
       continue;
     }
-    const group = JSON.stringify([card.merge, card.mergeTitle, card.source]);
-    groups.set(group, [...groups.get(group) ?? [], card]);
+    const group = JSON.stringify([card.merge, titleOf(card), card.source]);
+    groups.set(group, [...groups.get(group) ?? [], { card, hash }]);
   }
-  for (const cards of groups.values()) {
-    const { merge: merge2, mergeTitle, source } = cards[0];
-    for (let i = 0; i < cards.length; i += BATCH_SIZE) {
-      const batch = cards.slice(i, i + BATCH_SIZE);
+  if (heldBack) writeState(key, state);
+  for (const entries of groups.values()) {
+    const { card: first } = entries[0];
+    for (let i = 0; i < entries.length; i += BATCH_SIZE) {
+      if (opts.signal?.aborted) throw outOfTime();
+      const batch = entries.slice(i, i + BATCH_SIZE);
       const input = {
         repo: key,
-        merge: merge2,
-        mergeTitle: mergeTitle.trim().slice(0, MAX_TITLE) || merge2,
-        source,
-        cards: batch.map(toSubmitted)
+        merge: first.merge,
+        mergeTitle: titleOf(first),
+        source: first.source,
+        cards: batch.map((e) => toSubmitted(e.card))
       };
-      const result = checkSubmitResult(await remote.call("submit_cards", { ...input }));
-      const sent = new Set(batch.map((c) => c.id));
-      for (const id of [...result.accepted, ...result.unchanged]) {
-        if (!sent.has(id) || submitted[id]) continue;
-        submitted[id] = true;
+      const result = checkSubmitResult(await remote.call("submit_cards", { ...input }, { signal: opts.signal }));
+      const sent = new Map(batch.map((e) => [e.card.id, e.hash]));
+      for (const id of /* @__PURE__ */ new Set([...result.accepted, ...result.unchanged])) {
+        const hash = sent.get(id);
+        if (hash === void 0) continue;
+        submitted[id] = hash;
+        delete refused[id];
         report.uploaded++;
       }
-      report.rejected.push(...result.rejected.filter((r) => sent.has(r.id)));
+      for (const r of result.rejected) {
+        const hash = sent.get(r.id);
+        if (hash === void 0) continue;
+        refused[r.id] = hash;
+        report.rejected.push(r);
+      }
       writeState(key, state);
+      opts.refresh?.();
     }
   }
   return report;
 }
 var BUSY = "busy, try again: a capture or baseline is running";
 async function linkRepo(key, repoPath, site, remote, now = () => /* @__PURE__ */ new Date()) {
+  if (!REPO_KEY.test(key)) throw new Error("this repo's folder name is too long for the site: its key must be at most 80 characters");
   const lock = acquireLock(key);
   if (!lock) throw new Error(BUSY);
   try {
-    const name = path6.basename(repoPath).trim().slice(0, MAX_NAME) || key;
+    const name = cut(path6.basename(repoPath).trim(), MAX_NAME) || key;
     const linked = await remote.call("link_repo", { key, name });
     if (typeof linked?.repoId !== "string" || typeof linked?.deckId !== "string") throw new RemoteError("link_repo returned an unexpected result", "tool");
     const link = { site, repoId: linked.repoId, deckId: linked.deckId, linkedAt: now().toISOString() };
     setRemote(key, link);
     const state = readState(key);
     delete state.submitted;
+    delete state.refused;
+    delete state.anchorsPushed;
     delete state.remoteAuth;
     writeState(key, state);
-    const { uploaded, rejected } = await submitPending(key, remote);
+    const { uploaded, rejected } = await submitPending(key, remote, { refresh: lock.refresh });
     return { repoId: link.repoId, deckId: link.deckId, uploaded, rejected };
   } finally {
     lock.release();
@@ -26421,7 +26456,9 @@ function unlinkRepo(key) {
   return { unlinked: setRemote(key, void 0)?.site ?? null };
 }
 var ANCHOR_BATCH = 2e3;
-function failureLine(kind, step) {
+var SYNC_BUDGET_MS = 9e4;
+function failureLine(kind, step, timedOut) {
+  if (timedOut) return `site sync failed (network): timed out during ${step}`;
   if (kind === "auth") return `site sync failed (auth): the site refused the sign-in or it expired; run repobrain login`;
   if (kind === "network") return `site sync failed (network): could not reach the site during ${step}`;
   return `site sync failed (tool): ${step} failed`;
@@ -26433,39 +26470,71 @@ function setRemoteAuth(key, expired) {
   else delete state.remoteAuth;
   writeState(key, state);
 }
+function untilAborted(p, signal) {
+  p.then((r) => signal.aborted ? r.close().catch(() => {
+  }) : void 0, () => {
+  });
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) return reject(outOfTime());
+    const onAbort = () => reject(outOfTime());
+    signal.addEventListener("abort", onAbort, { once: true });
+    p.then(
+      (r) => (signal.removeEventListener("abort", onAbort), resolve(r)),
+      (e) => (signal.removeEventListener("abort", onAbort), reject(e))
+    );
+  });
+}
+var sha256 = (value) => createHash3("sha256").update(JSON.stringify(value)).digest("hex");
+async function pushAnchors(key, remote, rechecked, uploaded, signal, refresh) {
+  const submitted = readState(key).submitted ?? {};
+  const anchors = listCards(key).filter((c) => c.status !== "dropped" && submitted[c.id] !== void 0 && CARD_ID.test(c.id)).map((c) => rechecked.get(c.id) ?? { id: c.id, status: c.anchor.status, startLine: c.anchor.startLine, endLine: c.anchor.endLine });
+  const hash = sha256(anchors);
+  if (hash === readState(key).anchorsPushed && uploaded === 0) return;
+  for (let i = 0; i < anchors.length; i += ANCHOR_BATCH) {
+    if (signal.aborted) throw outOfTime();
+    await remote.call("update_anchors", { repo: key, anchors: anchors.slice(i, i + ANCHOR_BATCH) }, { signal });
+    refresh?.();
+  }
+  const state = readState(key);
+  state.anchorsPushed = hash;
+  writeState(key, state);
+}
 async function syncToSite(key, opts = {}) {
   const report = { uploaded: 0, rejected: [] };
+  const budget2 = new AbortController();
+  const timer = setTimeout(() => budget2.abort(), opts.budgetMs ?? SYNC_BUDGET_MS);
+  timer.unref();
+  const signal = budget2.signal;
   let step = "connect";
   try {
     const link = loadConfig().repos[key]?.remote;
     if (!link) return 0;
     if (!isSignedIn(link.site)) throw new RemoteError("not signed in", "auth");
-    const remote = await (opts.connect ?? connectRemote)(link.site);
+    const remote = await untilAborted((opts.connect ?? connectRemote)(link.site), signal);
     try {
+      setRemoteAuth(key, false);
       step = "submit_cards";
-      await submitPending(key, remote, report);
+      await submitPending(key, remote, { report, signal, refresh: opts.refresh });
       if (opts.anchors) {
         step = "update_anchors";
-        const anchors = listCards(key).filter((c) => c.status === "kept").map((c) => ({ id: c.id, status: c.anchor.status, startLine: c.anchor.startLine, endLine: c.anchor.endLine }));
-        for (let i = 0; i < anchors.length; i += ANCHOR_BATCH) {
-          await remote.call("update_anchors", { repo: key, anchors: anchors.slice(i, i + ANCHOR_BATCH) });
-        }
+        await pushAnchors(key, remote, opts.anchors, report.uploaded, signal, opts.refresh);
       }
     } finally {
       await remote.close().catch(() => {
       });
     }
-    setRemoteAuth(key, false);
     if (report.uploaded || report.rejected.length) {
       appendLog(key, `site: ${report.uploaded} cards uploaded${report.rejected.length ? `, ${report.rejected.length} refused: ${report.rejected.map((r) => r.id).join(" ")}` : ""}`);
     }
   } catch (e) {
     const kind = e instanceof RemoteError ? e.kind : "tool";
     try {
-      appendLog(key, failureLine(kind, step) + (report.uploaded ? ` (${report.uploaded} cards uploaded first)` : ""));
-      if (kind === "auth") setRemoteAuth(key, true);
+      appendLog(key, failureLine(kind, step, signal.aborted) + (report.uploaded ? ` (${report.uploaded} cards uploaded first)` : ""));
+      if (kind === "auth" && !signal.aborted) setRemoteAuth(key, true);
     } catch {
     }
+  } finally {
+    clearTimeout(timer);
   }
   return report.uploaded;
 }
@@ -26776,7 +26845,7 @@ ${body}`,
       return finish("failed", drafted.costUsd, `no usable cards: ${why}`);
     }
     const out = finish("drafted", drafted.costUsd);
-    out.uploaded = await syncToSite(key, { connect: opts.connect });
+    out.uploaded = await syncToSite(key, { connect: opts.connect, refresh: lock.refresh });
     return out;
   } finally {
     lock.release();
@@ -26886,13 +26955,15 @@ async function capture(key, opts) {
     }
     const state = readState(key);
     const result = await captureMerges(key, repo, state, branch, head, report, opts, now, maxDiffBytes, lock.refresh);
-    result.anchorsUpdated = updateAnchors(key, repo.path, head, lock.refresh);
+    const submitted = repo.remote ? new Set(Object.keys(state.submitted ?? {})) : null;
+    const checked = updateAnchors(key, repo.path, head, lock.refresh, submitted);
+    result.anchorsUpdated = checked.updated;
     if (result.status !== "failed" && state.lastError) {
       delete state.lastError;
       writeState(key, state);
     }
     lock.refresh();
-    result.uploaded = await syncToSite(key, { connect: opts.connect, anchors: true });
+    result.uploaded = await syncToSite(key, { connect: opts.connect, anchors: checked.anchors, refresh: lock.refresh });
     return result;
   } catch (e) {
     recordError(key, message3(e), now());
@@ -27058,20 +27129,23 @@ async function captureMerges(key, repo, state, branch, head, report, opts, now, 
   if (commits.length === 0 && state.lastSha !== head) save(head);
   return report;
 }
-function updateAnchors(key, repoPath, head, refresh) {
+function updateAnchors(key, repoPath, head, refresh, submitted) {
   refresh();
   const contents = /* @__PURE__ */ new Map();
   const ids = /* @__PURE__ */ new Map();
+  const anchors = /* @__PURE__ */ new Map();
   let updated = 0;
   for (const listed of listCards(key)) {
-    if (listed.status !== "kept") continue;
+    if (listed.status !== "kept" && !(submitted && listed.status !== "dropped" && submitted.has(listed.id))) continue;
     try {
       const a = listed.anchor;
       const headId = memo3(ids, `${head}:${a.path}`, () => objectId(repoPath, head, a.path));
       const anchoredId = memo3(ids, `${a.commit}:${a.path}`, () => objectId(repoPath, a.commit, a.path));
       const match = headId !== null && headId === anchoredId ? { status: "fresh", startLine: a.startLine, endLine: a.endLine } : locateAnchor(memo3(contents, a.path, () => fileAt(repoPath, head, a.path)), a);
       const next = match.status === "fresh" && (match.startLine !== a.startLine || match.endLine !== a.endLine) ? { ...a, commit: head, startLine: match.startLine, endLine: match.endLine, status: "fresh" } : { ...a, status: match.status };
+      anchors.set(listed.id, { id: listed.id, status: next.status, startLine: next.startLine, endLine: next.endLine });
       if (next.status === a.status && next.startLine === a.startLine && next.endLine === a.endLine) continue;
+      if (listed.status !== "kept") continue;
       const current = readCard(key, listed.id);
       const same = current.anchor.commit === a.commit && current.anchor.path === a.path && current.anchor.fingerprint === a.fingerprint;
       if (current.status !== "kept" || !same) continue;
@@ -27081,7 +27155,7 @@ function updateAnchors(key, repoPath, head, refresh) {
       appendLog(key, `anchor check for ${listed.id} failed: ${message3(e)}`);
     }
   }
-  return updated;
+  return { updated, anchors };
 }
 
 // src/schedule.ts

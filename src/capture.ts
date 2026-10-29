@@ -5,7 +5,7 @@ import type { Anchor, Card } from "./format.js";
 import { ClaudeEnvError, ClaudeLimitError, ClaudeResultError, costLabel, draftCards, ModelOutputError, runClaude, totalCost, type RunClaude } from "./generate.js";
 import { commitDiff, defaultBranch, fetchQuietly, fileAt, firstParentCommits, git, isAncestor, mergeBase, resolveCommit, toplevel } from "./git.js";
 import { diffPaths, filterDiff } from "./guard.js";
-import { syncToSite } from "./sync.js";
+import { syncToSite, type AnchorPush } from "./sync.js";
 import type { Remote } from "./remote.js";
 import { acquireLock, appendLog, listCards, loadConfig, mayWriteDraft, readCard, readState, writeCard, writeState, type RepoConfig, type RepoState } from "./store.js";
 
@@ -114,15 +114,18 @@ async function capture(key: string, opts: CaptureOptions): Promise<CaptureReport
     }
     const state: RepoState = readState(key);
     const result = await captureMerges(key, repo, state, branch, head, report, opts, now, maxDiffBytes, lock.refresh);
-    // Every path that got this far checks anchors, including a run that stopped early on a failure.
-    result.anchorsUpdated = updateAnchors(key, repo.path, head, lock.refresh);
+    // Every path that got this far checks anchors, including a run that stopped early on a failure. Once the
+    // repo is linked, curation happens on the site, so every submitted card that isn't dropped here is checked.
+    const submitted = repo.remote ? new Set(Object.keys(state.submitted ?? {})) : null;
+    const checked = updateAnchors(key, repo.path, head, lock.refresh, submitted);
+    result.anchorsUpdated = checked.updated;
     if (result.status !== "failed" && state.lastError) {
       delete state.lastError;
       writeState(key, state);
     }
     // Last, after every write of this run's state: the upload saves its own progress in state.json.
     lock.refresh();
-    result.uploaded = await syncToSite(key, { connect: opts.connect, anchors: true });
+    result.uploaded = await syncToSite(key, { connect: opts.connect, anchors: checked.anchors, refresh: lock.refresh });
     return result;
   } catch (e) {
     recordError(key, message(e), now());
@@ -314,15 +317,24 @@ async function captureMerges(
 /**
  * Re-checks kept cards' anchors at `head`, orphaned ones included since a file can come back.
  * A block found at other lines moves the card's range there (re-anchored at `head`).
- * Returns how many cards changed.
+ * With `submitted` (a linked repo), it also checks every submitted card that isn't dropped locally, drafts
+ * included, for the site; only kept cards' files are rewritten, so local statuses stay as they were.
+ * Returns how many card files changed, and each checked card's anchor as found.
  */
-function updateAnchors(key: string, repoPath: string, head: string, refresh: () => void): number {
+function updateAnchors(
+  key: string,
+  repoPath: string,
+  head: string,
+  refresh: () => void,
+  submitted: Set<string> | null,
+): { updated: number; anchors: Map<string, AnchorPush> } {
   refresh();
   const contents = new Map<string, string | null>();
   const ids = new Map<string, string | null>();
+  const anchors = new Map<string, AnchorPush>();
   let updated = 0;
   for (const listed of listCards(key)) {
-    if (listed.status !== "kept") continue;
+    if (listed.status !== "kept" && !(submitted && listed.status !== "dropped" && submitted.has(listed.id))) continue;
     try {
       const a = listed.anchor;
       const headId = memo(ids, `${head}:${a.path}`, () => objectId(repoPath, head, a.path));
@@ -336,7 +348,9 @@ function updateAnchors(key: string, repoPath: string, head: string, refresh: () 
         match.status === "fresh" && (match.startLine !== a.startLine || match.endLine !== a.endLine)
           ? { ...a, commit: head, startLine: match.startLine, endLine: match.endLine, status: "fresh" }
           : { ...a, status: match.status };
+      anchors.set(listed.id, { id: listed.id, status: next.status, startLine: next.startLine, endLine: next.endLine });
       if (next.status === a.status && next.startLine === a.startLine && next.endLine === a.endLine) continue;
+      if (listed.status !== "kept") continue;
       // Re-read just before writing, so a curate made meanwhile isn't reverted.
       const current: Card = readCard(key, listed.id);
       const same = current.anchor.commit === a.commit && current.anchor.path === a.path && current.anchor.fingerprint === a.fingerprint;
@@ -347,5 +361,5 @@ function updateAnchors(key: string, repoPath: string, head: string, refresh: () 
       appendLog(key, `anchor check for ${listed.id} failed: ${message(e)}`);
     }
   }
-  return updated;
+  return { updated, anchors };
 }
