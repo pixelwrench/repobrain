@@ -25596,13 +25596,20 @@ function lockedAuthProvider(provider, opts = {}) {
         const stored = (await provider.tokens())?.access_token;
         if (stored !== void 0 && stored !== sent) return;
         let timedOut = false;
+        let refused = false;
         const fetchFn = (url2, init) => {
           const timeout = AbortSignal.timeout(timeoutMs);
           const signal = init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout;
-          return ctx.fetchFn(url2, { ...init, signal }).catch((e) => {
-            if (timeout.aborted) timedOut = true;
-            throw e;
-          });
+          return ctx.fetchFn(url2, { ...init, signal }).then(
+            (res) => {
+              if (res.status === 400 || res.status === 401) refused = true;
+              return res;
+            },
+            (e) => {
+              if (timeout.aborted) timedOut = true;
+              throw e;
+            }
+          );
         };
         const timeoutError = () => new RemoteError(`the site's sign-in server didn't answer within ${Math.round(timeoutMs / 1e3)}s`, "network");
         const { resourceMetadataUrl, scope } = extractWWWAuthenticateParams(ctx.response);
@@ -25610,9 +25617,9 @@ function lockedAuthProvider(provider, opts = {}) {
         try {
           result = await auth(provider, { serverUrl: ctx.serverUrl, resourceMetadataUrl, scope, fetchFn });
         } catch (e) {
-          throw timedOut ? timeoutError() : e;
+          throw timedOut && !refused && !(e instanceof OAuthError) ? timeoutError() : e;
         }
-        if (result !== "AUTHORIZED") throw timedOut ? timeoutError() : new UnauthorizedError();
+        if (result !== "AUTHORIZED") throw timedOut && !refused ? timeoutError() : new UnauthorizedError();
       }, opts.lockWaitMs);
     }
   };

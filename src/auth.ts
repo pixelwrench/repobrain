@@ -5,7 +5,7 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import path from "node:path";
 import {
-  auth, extractWWWAuthenticateParams, UnauthorizedError,
+  auth, extractWWWAuthenticateParams, OAuthError, UnauthorizedError,
   type AuthProvider, type AuthResult, type FetchLike, type OAuthClientMetadata, type OAuthClientProvider, type OAuthDiscoveryState,
   type StoredOAuthClientInformation, type StoredOAuthTokens,
 } from "@modelcontextprotocol/client";
@@ -282,13 +282,21 @@ export function lockedAuthProvider(provider: OAuthClientProvider, opts: { refres
         if (stored !== undefined && stored !== sent) return; // refreshed by another process: retry with it
         // Every request of the refresh gets a deadline, so a site that never answers can't hold the lock.
         let timedOut = false;
+        // Whether the site answered a request with an OAuth error (400 or 401), such as a refused refresh token.
+        let refused = false;
         const fetchFn: FetchLike = (url, init) => {
           const timeout = AbortSignal.timeout(timeoutMs);
           const signal = init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout;
-          return ctx.fetchFn(url, { ...init, signal }).catch((e: unknown) => {
-            if (timeout.aborted) timedOut = true;
-            throw e;
-          });
+          return ctx.fetchFn(url, { ...init, signal }).then(
+            (res) => {
+              if (res.status === 400 || res.status === 401) refused = true;
+              return res;
+            },
+            (e: unknown) => {
+              if (timeout.aborted) timedOut = true;
+              throw e;
+            },
+          );
         };
         const timeoutError = () => new RemoteError(`the site's sign-in server didn't answer within ${Math.round(timeoutMs / 1000)}s`, "network");
         const { resourceMetadataUrl, scope } = extractWWWAuthenticateParams(ctx.response);
@@ -297,9 +305,12 @@ export function lockedAuthProvider(provider: OAuthClientProvider, opts: { refres
           result = await auth(provider, { serverUrl: ctx.serverUrl, resourceMetadataUrl, scope, fetchFn });
         } catch (e) {
           // The SDK answers a failed refresh by starting a browser sign-in, which fails outside login.
-          throw timedOut ? timeoutError() : e;
+          // A timeout is blamed only when the site never gave a real OAuth answer. A refresh token refused after
+          // an earlier request timed out (and the SDK carried on) is still a sign-in to redo; the SDK then asks
+          // for a browser sign-in, which this provider refuses with an UnauthorizedError.
+          throw timedOut && !refused && !(e instanceof OAuthError) ? timeoutError() : e;
         }
-        if (result !== "AUTHORIZED") throw timedOut ? timeoutError() : new UnauthorizedError();
+        if (result !== "AUTHORIZED") throw timedOut && !refused ? timeoutError() : new UnauthorizedError();
       }, opts.lockWaitMs);
     },
   };

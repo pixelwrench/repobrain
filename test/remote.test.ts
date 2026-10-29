@@ -256,6 +256,18 @@ describe("connectRemote with stored tokens", () => {
     expect(e.message).toMatch(/repobrain login/);
   });
 
+  it("reports a refused refresh as auth even after an earlier request of the refresh timed out", async () => {
+    // The SDK gives up on the protected-resource metadata and carries on; the refresh token is then refused.
+    site = await startFakeSite({
+      accept: [FRESH], hang: ["/.well-known/oauth-protected-resource/api/mcp"], token: () => ({ status: 400, body: { error: "invalid_grant" } }),
+    });
+    await signedIn(site.base);
+    const e = await caught(connectRemote(site.base, { refreshTimeoutMs: 300 }));
+    expect(site.hits).toContain("POST /token refresh_token");
+    expect(e.kind).toBe("auth");
+    expect(e.message).toMatch(/repobrain login/);
+  });
+
   it("reports a missing sign-in as an auth error", async () => {
     site = await startFakeSite({ accept: [FRESH], token: () => ({ status: 400, body: {} }) });
     const e = await caught(connectRemote(site.base));

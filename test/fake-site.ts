@@ -13,6 +13,8 @@ export interface FakeSiteOptions {
   accept: string[];
   /** The /token endpoint: the response body and status for a form. */
   token: (form: URLSearchParams) => { status: number; body: unknown } | Promise<{ status: number; body: unknown }>;
+  /** Paths that never answer, such as a metadata endpoint, to make a request time out. */
+  hang?: string[];
 }
 
 /**
@@ -31,6 +33,7 @@ export async function startFakeSite(options: FakeSiteOptions): Promise<FakeSite>
       res.end(JSON.stringify(value));
     };
     hits.push(`${req.method} ${url.pathname}${url.pathname === "/token" ? ` ${new URLSearchParams(body).get("grant_type")}` : ""}`);
+    if (options.hang?.includes(url.pathname)) return;
     if (url.pathname === "/.well-known/oauth-protected-resource/api/mcp") {
       return json(200, { resource: `${base}/api/mcp`, authorization_servers: [base] });
     }
