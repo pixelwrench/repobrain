@@ -138,14 +138,14 @@ describe("cli", () => {
 
     it("groups week by commit and title, so each baseline area is its own group, and says each group's source", async () => {
       const { a, b } = await withBaseline();
-      const groups = ((await cli("week")).out as WeekOutput).areas["src"];
-      expect(groups.map((g) => [g.title, g.source, g.cards.length])).toEqual([
-        ["feat: referral codes", "merge", 2],
-        ["Baseline: Entry points", "baseline", 1],
-        ["Baseline: Referrals", "baseline", 1],
+      // Groups come in card-file order, which depends on the commit's SHA, so sort by title.
+      const groups = ((await cli("week")).out as WeekOutput).areas["src"].sort((x, y) => x.title.localeCompare(y.title));
+      expect(groups.map((g) => [g.title, g.source, g.cards.map((c) => c.id)])).toEqual([
+        ["Baseline: Entry points", "baseline", [a.id]],
+        ["Baseline: Referrals", "baseline", [b.id]],
+        ["feat: referral codes", "merge", expect.any(Array)],
       ]);
-      expect(groups[1].cards[0].id).toBe(a.id);
-      expect(groups[2].cards[0].id).toBe(b.id);
+      expect(groups[2].cards).toHaveLength(2);
     });
 
     it("splits stats by source, keeping the overall figures", async () => {
