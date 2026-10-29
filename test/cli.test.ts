@@ -4,7 +4,7 @@ import path from "node:path";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { main, type CurateUnreadable, type DueOutput, type ShowOutput, type StatsOutput, type WeekOutput } from "../src/cli.js";
 import { LETTERS, type Card } from "../src/format.js";
-import type { RunClaude } from "../src/generate.js";
+import { ClaudeEnvError, type RunClaude } from "../src/generate.js";
 import { cardPath, home, listCards, readCard, readJsonl, readState, repoDir, writeCard, writeState } from "../src/store.js";
 import { commit, makeRepo, sh, tempDir, useTempHome } from "./helpers.js";
 
@@ -159,6 +159,44 @@ describe("cli", () => {
         merge: { cards: 2, draft: 1, kept: 1, dropped: 0, curated: { keep: 1, fix: 0, drop: 0 } },
         baseline: { cards: 2, draft: 0, kept: 1, dropped: 1, curated: { keep: 0, fix: 1, drop: 1 } },
       });
+    });
+  });
+
+  describe("baseline", () => {
+    const areas = [{ name: "Referrals", why: "How codes become discounts", files: ["src/ref.ts"] }, { name: "Other", why: "w", files: ["src/ref.ts"] }];
+    const planRun: RunClaude = async () => ({ text: JSON.stringify(areas), costUsd: 0.004 });
+    const base = (argv: string[], r: RunClaude = run) => main(["baseline", ...argv, "--repo", repo], { now, run: r });
+
+    it("plans, skips, drafts and reports status", async () => {
+      await cli("connect");
+      expect(await base(["status"])).toEqual({ code: 0, out: { plan: null, totals: null, costUsd: null } });
+      expect(await base(["draft", "--next"])).toEqual({ code: 1, out: { error: "no baseline plan; run codebrain baseline plan first" } });
+      const planned = await base(["plan", "--no-fetch"], planRun);
+      expect(planned).toMatchObject({ code: 0, out: { existing: false, costUsd: 0.004, plan: { areas: [{ id: "a01-referrals" }, { id: "a02-other" }] } } });
+      expect(await base(["plan", "--no-fetch"], planRun)).toMatchObject({ code: 0, out: { existing: true } });
+      expect(await base(["skip", "a02-other"])).toMatchObject({ code: 0, out: { id: "a02-other", status: "skipped" } });
+      expect(await base(["unskip", "a02-other"])).toMatchObject({ code: 0, out: { status: "planned" } });
+      expect(await base(["skip", "a02-other"])).toMatchObject({ code: 0 });
+      const drafted = await base(["draft", "--next"]);
+      expect(drafted).toMatchObject({ code: 0, out: { area: { id: "a01-referrals", status: "drafted" }, cardsWritten: 2 } });
+      expect(await base(["draft", "a01-referrals"])).toMatchObject({ code: 1, out: { error: expect.stringMatching(/already drafted/) } });
+      expect(await base(["draft", "--next"])).toMatchObject({ code: 0, out: { area: null } });
+      expect(await base(["status"])).toMatchObject({ code: 0, out: { totals: { drafted: 1, skipped: 1, cards: 2 }, costUsd: 0.004 } });
+      const week = (await cli("week")).out as WeekOutput;
+      expect(week.areas["src"].map((g) => g.title)).toEqual(["Baseline: Referrals"]);
+    });
+
+    it("exits 1 when drafting fails, and 2 on bad arguments", async () => {
+      await cli("connect");
+      await base(["plan", "--no-fetch"], planRun);
+      const offline: RunClaude = async () => {
+        throw new ClaudeEnvError("claude is offline");
+      };
+      expect(await base(["draft", "--next"], offline)).toMatchObject({ code: 1, out: { error: "claude is offline", area: { status: "planned" } } });
+      for (const argv of [[], ["nope"], ["draft"], ["draft", "a01-referrals", "--next"], ["draft", "../x"], ["skip"], ["unskip", "a", "b"], ["status", "x"]]) {
+        expect((await base(argv)).code).toBe(2);
+      }
+      expect((await base(["skip", "a09"])).code).toBe(1);
     });
   });
 

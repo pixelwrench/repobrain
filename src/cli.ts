@@ -2,6 +2,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { findSymbolLines, makeAnchor } from "./anchor.js";
+import {
+  baselineStatus, draftBaselineArea, planBaseline, setAreaSkipped, type AreaDraftReport, type BaselineArea, type BaselineStatus, type PlanReport,
+} from "./baseline.js";
 import { runCapture, type CaptureReport } from "./capture.js";
 import { areaOf, CARD_SOURCES, LETTERS, type Anchor, type AnchorStatus, type Card, type CardBody, type CardSource, type CardStatus } from "./format.js";
 import type { RunClaude } from "./generate.js";
@@ -140,9 +143,19 @@ export interface ShowOutput {
   atCommit: { commit: string; lines: string | null };
 }
 
+/** `baseline plan`: the plan saved (or the existing one), what was sent, and the call's cost. */
+export type BaselinePlanOutput = PlanReport;
+/** `baseline draft`: the area drafted, cards written, files not sent, and the call's cost. */
+export type BaselineDraftOutput = AreaDraftReport;
+/** `baseline status`: the plan with each area's status, totals, and the total known cost. */
+export type BaselineStatusOutput = BaselineStatus;
+/** `baseline skip` and `unskip`: the area afterwards. */
+export type BaselineAreaOutput = BaselineArea;
+
 export type CliOutput =
   | ErrorOutput | CurateUnreadable | ConnectOutput | CaptureOutput | WeekOutput | CurateOutput
-  | DueOutput | GradeOutput | StatsOutput | CardOutput | AnswerOutput | ShowOutput;
+  | DueOutput | GradeOutput | StatsOutput | CardOutput | AnswerOutput | ShowOutput
+  | BaselinePlanOutput | BaselineDraftOutput | BaselineStatusOutput | BaselineAreaOutput;
 
 export interface CliResult {
   /** 0 on success, 1 on a failure, 2 on bad arguments. */
@@ -156,7 +169,9 @@ export interface CliDeps {
   run?: RunClaude;
 }
 
-const USAGE = "usage: codebrain <connect|capture|week|curate|show|due|answer|grade|stats|card> [--repo <path>]";
+const USAGE = "usage: codebrain <connect|capture|week|curate|show|due|answer|grade|stats|card|baseline> [--repo <path>]";
+const BASELINE_USAGE =
+  "usage: codebrain baseline plan [--force] [--no-fetch], baseline draft <area-id>|--next, baseline status, baseline skip <area-id>, baseline unskip <area-id>";
 const CURATE_USAGE = "usage: codebrain curate <id> keep|fix|drop, or curate <id> fix --path P --lines S-E [--symbol X|--no-symbol]";
 const DECISIONS = ["keep", "fix", "drop"] as const;
 type Decision = (typeof DECISIONS)[number];
@@ -310,6 +325,8 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
         lines: { type: "string" },
         symbol: { type: "string" },
         "no-symbol": { type: "boolean" },
+        force: { type: "boolean" },
+        next: { type: "boolean" },
       },
     });
   } catch (e) {
@@ -525,6 +542,34 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
       const out: AnswerOutput =
         b.kind === "mcq" ? { id, kind: "mcq", correct: LETTERS[b.correctChoice], explanation: b.explanation } : { id, kind: "flashcard", back: b.back };
       return ok(out);
+    }
+    case "baseline": {
+      const [sub, id, ...extra] = positionals;
+      if (extra.length > 0) return usage(BASELINE_USAGE);
+      if (id !== undefined && !isSafeId(id)) return usage(`invalid area id ${JSON.stringify(id)}`);
+      switch (sub) {
+        case "plan": {
+          if (id !== undefined) return usage(BASELINE_USAGE);
+          const { key } = connected(values.repo);
+          const out: BaselinePlanOutput = await planBaseline(key, { force: values.force, fetch: !values["no-fetch"], run: deps.run, now });
+          return { code: out.error ? 1 : 0, out };
+        }
+        case "draft": {
+          if ((id === undefined) === !values.next) return usage(`draft takes an area id or --next; ${BASELINE_USAGE}`);
+          const { key } = connected(values.repo);
+          const out: BaselineDraftOutput = await draftBaselineArea(key, { areaId: id, next: values.next, run: deps.run, now });
+          return { code: out.error ? 1 : 0, out };
+        }
+        case "status":
+          if (id !== undefined) return usage(BASELINE_USAGE);
+          return ok(baselineStatus(connected(values.repo).key) satisfies BaselineStatusOutput);
+        case "skip":
+        case "unskip":
+          if (id === undefined) return usage(BASELINE_USAGE);
+          return ok(setAreaSkipped(connected(values.repo).key, id, sub === "skip") satisfies BaselineAreaOutput);
+        default:
+          return usage(BASELINE_USAGE);
+      }
     }
     case "card": {
       const id = positionals[0];
