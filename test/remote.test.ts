@@ -137,10 +137,11 @@ describe("connectRemote with stored tokens", () => {
     await site?.close();
   });
 
+  /** Stored as the SDK leaves them: stamped with the issuer they came from. */
   async function signedIn(base: string): Promise<void> {
     const p = new FileOAuthProvider(base);
-    p.saveClientInformation({ client_id: "c1", redirect_uris: ["http://127.0.0.1:1/callback"] });
-    p.saveTokens({ access_token: EXPIRED, token_type: "bearer", refresh_token: REFRESH });
+    p.saveClientInformation({ client_id: "c1", redirect_uris: ["http://127.0.0.1:1/callback"], issuer: base });
+    p.saveTokens({ access_token: EXPIRED, token_type: "bearer", refresh_token: REFRESH, issuer: base });
   }
 
   it("refreshes an expired access token without a browser and saves the rotated tokens", async () => {
@@ -157,7 +158,8 @@ describe("connectRemote with stored tokens", () => {
     expect(await remote.call("list_my_decks", {})).toEqual({ ok: true });
     expect(site.hits).toContain("POST /token refresh_token");
     const stored = JSON.parse(fs.readFileSync(authPath(), "utf8")).sites[site.base].tokens;
-    expect(stored).toMatchObject({ access_token: FRESH, refresh_token: ROTATED });
+    // The SDK's issuer stamp is kept, so it checks the tokens belong to this site's authorization server.
+    expect(stored).toMatchObject({ access_token: FRESH, refresh_token: ROTATED, issuer: site.base });
   });
 
   /** Bundles the client so plain node child processes can run it; each run connects and calls one tool. */
