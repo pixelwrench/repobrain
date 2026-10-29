@@ -14,6 +14,8 @@ export interface FakeRemoteOptions {
   fail?: (tool: string) => RemoteError | null;
   /** How long each call takes; an aborted signal ends the wait, as the real client does. */
   delayMs?: number;
+  /** Card ids record_quiz_results skips, as the site does for drafts, dropped and unknown cards. */
+  unstudied?: Set<string>;
   /** Answers for tools, by name, overriding the defaults below. */
   answers?: Record<string, (args: Record<string, unknown>) => unknown>;
 }
@@ -57,8 +59,11 @@ export function fakeRemote(opts: FakeRemoteOptions = {}): FakeRemote {
       if (tool === "get_due_cards") return { deckId: args.deckId, cards: [] } as T;
       if (tool === "get_deck") return { id: args.deckId, cardCount: 0, cards: [], nextOffset: null } as T;
       if (tool === "record_quiz_results") {
-        const outcomes = args.outcomes as { correct: boolean }[];
-        return { recorded: outcomes.length, correct: outcomes.filter((o) => o.correct).length, skipped: [], streakDays: 1 } as T;
+        // As the site does: answers for cards it doesn't study are skipped, and only the rest are scored.
+        const outcomes = args.outcomes as { cardId: string; correct: boolean }[];
+        const recorded = outcomes.filter((o) => !opts.unstudied?.has(o.cardId));
+        const skipped = [...new Set(outcomes.filter((o) => opts.unstudied?.has(o.cardId)).map((o) => o.cardId))];
+        return { recorded: recorded.length, correct: recorded.filter((o) => o.correct).length, skipped, streakDays: 1 } as T;
       }
       if (tool === "link_repo") return { repoId: "repo-1", deckId: "deck-1", created: true } as T;
       if (tool === "submit_cards") {

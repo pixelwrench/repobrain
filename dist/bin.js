@@ -29183,7 +29183,7 @@ ${USAGE}`);
           }
           const res = await remote.call("record_quiz_results", { deckId: link.deckId, outcomes: [{ cardId, correct: grade === "right" }] }, timed);
           if (!isObj(res) || typeof res.recorded !== "number" || !Array.isArray(res.skipped)) throw new RemoteError("record_quiz_results returned an unexpected result", "tool");
-          if (res.skipped.includes(cardId) || res.recorded === 0) return fail(`card ${id} isn't studied on the site: it may be a draft or dropped`);
+          if (res.recorded === 0 || res.skipped.length > 0) return fail(`card ${id} isn't studied on the site: it may be a draft or dropped`);
           return ok({ id, recorded: true, site: link.site, remote: true });
         });
       }
