@@ -292,7 +292,8 @@ function failureLine(kind: string, step: string, timedOut: boolean): string {
   return `site sync failed (tool): ${step} failed`;
 }
 
-function setRemoteAuth(key: string, expired: boolean): void {
+/** Sets or clears `state.remoteAuth`, the mark that the site refused the sign-in. */
+export function setRemoteAuth(key: string, expired: boolean): void {
   const state = readState(key);
   if (expired === (state.remoteAuth === "expired")) return;
   if (expired) state.remoteAuth = "expired";

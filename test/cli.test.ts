@@ -7,6 +7,9 @@ import { LETTERS, type Card } from "../src/format.js";
 import { ClaudeEnvError, type RunClaude } from "../src/generate.js";
 import { acquireLock, cardPath, findRepo, home, listCards, readCard, readJsonl, readState, repoDir, writeCard, writeState } from "../src/store.js";
 import { commit, makeRepo, sh, tempDir, useTempHome } from "./helpers.js";
+import { FileOAuthProvider, logout } from "../src/auth.js";
+import { RemoteError } from "../src/remote.js";
+import { callsTo, emptySiteWeek, fakeRemote, submits, type FakeRemote } from "./fake-remote.js";
 
 const FILE = ["export function applyReferral(code: string) {", "  const ref = lookup(code);", "  if (!ref) return null;", "  return discount(ref);", "}", ""].join("\n");
 const run: RunClaude = async () => ({
@@ -649,5 +652,228 @@ describe("the repobrain binary", () => {
     const bad = spawn(["grade", "../x", "right", "--repo", repo]);
     expect(bad).toMatchObject({ code: 2, out: { error: 'invalid card id "../x"' } });
     expect(bad.stderr).toBe("");
+  });
+});
+
+describe("cli with a repo linked to the site", () => {
+  const SITE = "http://localhost:3000";
+  const MCQ_ID = "11111111-1111-4111-8111-111111111111";
+  const FLASH_ID = "22222222-2222-4222-8222-222222222222";
+  let repo: string;
+  let key: string;
+  let remote: FakeRemote;
+  let connects: number;
+  const cli = (...argv: string[]) => main([...argv, "--repo", repo], { now, run, connect: async () => (connects++, remote) });
+  const byKind = (kind: string): Card => listCards(key).find((c) => c.body.kind === kind)!;
+  /** The site's copies of the local cards, as get_due_cards and get_deck list them. */
+  const siteCards = () => {
+    const mcq = byKind("mcq").body as Extract<Card["body"], { kind: "mcq" }>;
+    const flash = byKind("flashcard").body as Extract<Card["body"], { kind: "flashcard" }>;
+    return [
+      { id: MCQ_ID, kind: "MULTIPLE_CHOICE", term: mcq.question, definition: mcq.choices[mcq.correctChoice], choices: mcq.choices, explanation: mcq.explanation },
+      { id: FLASH_ID, term: flash.front, definition: flash.back },
+    ];
+  };
+
+  beforeEach(async () => {
+    useTempHome();
+    repo = makeRepo();
+    commit(repo, { "src/ref.ts": FILE }, "feat: referral codes");
+    connects = 0;
+    remote = fakeRemote();
+    key = ((await cli("connect")).out as { connected: string }).connected;
+    await cli("capture", "--since", "1 year ago", "--no-fetch");
+    new FileOAuthProvider(SITE).saveTokens({ access_token: "at-" + "x", token_type: "bearer" });
+    expect((await main(["link", "--site", SITE, "--repo", repo], { connect: async () => remote })).code).toBe(0);
+    remote = fakeRemote();
+  });
+
+  describe("week", () => {
+    it("uploads pending cards first, then prints the site's week with the local status and the site", async () => {
+      writeCard(key, { ...byKind("flashcard"), id: "late-1" });
+      const siteWeek = { ...emptySiteWeek(), drafts: 3, lesson: { title: "This week", deckId: "deck-1" } };
+      remote = fakeRemote({ answers: { get_week: () => siteWeek } });
+      writeState(key, { ...readState(key), lastError: { at: "2026-11-01T09:00:00.000Z", message: "git broke" } });
+      const r = await cli("week");
+      expect(r).toEqual({ code: 0, out: { ...siteWeek, lastCaptureError: { at: "2026-11-01T09:00:00.000Z", message: "git broke" }, site: SITE, weekUrl: `${SITE}/repos/repo-1/week`, remote: true } });
+      expect(remote.calls.map((c) => c.tool)).toEqual(["submit_cards", "get_week"]);
+      expect(remote.calls[1]).toMatchObject({ args: { repo: key }, opts: { timeout: 30_000 } });
+    });
+
+    it("prints the local week with remoteError when the site fails", async () => {
+      remote = fakeRemote({ fail: (tool) => (tool === "get_week" ? new RemoteError("could not reach the site", "network") : null) });
+      const r = await cli("week");
+      expect(r.code).toBe(0);
+      expect(r.out).toMatchObject({ drafts: 2, flagged: 0, site: SITE, remote: false, remoteError: "could not reach the site" });
+      expect((r.out as WeekOutput).areas["src"][0].cards).toHaveLength(2);
+      expect(r.out).not.toHaveProperty("loginHint");
+    });
+
+    it("says to run repobrain login when the site refuses the sign-in", async () => {
+      remote = fakeRemote({ fail: (tool) => (tool === "get_week" ? new RemoteError("not signed in", "auth") : null) });
+      const r = await cli("week");
+      expect(r.out).toMatchObject({ remote: false, loginHint: expect.stringMatching(/repobrain login/) });
+      expect(readState(key).remoteAuth).toBe("expired");
+      remote = fakeRemote();
+      const again = await cli("week");
+      expect(again.out).toMatchObject({ remote: true });
+      expect(again.out).not.toHaveProperty("loginHint");
+      expect(readState(key).remoteAuth).toBeUndefined();
+    });
+
+    it("doesn't connect when this machine isn't signed in", async () => {
+      logout(SITE);
+      const r = await cli("week");
+      expect(r.out).toMatchObject({ drafts: 2, remote: false, remoteError: expect.stringMatching(/repobrain login/) });
+      expect(connects).toBe(0);
+    });
+  });
+
+  describe("curate", () => {
+    it("saves keep and drop on the site and in the local file", async () => {
+      const mcq = byKind("mcq");
+      const flash = byKind("flashcard");
+      expect(await cli("curate", mcq.id, "keep")).toEqual({ code: 0, out: { id: mcq.id, status: "kept", reanchored: false } });
+      expect(await cli("curate", flash.id, "drop")).toEqual({ code: 0, out: { id: flash.id, status: "dropped", reanchored: false } });
+      expect(callsTo(remote, "curate_card")).toEqual([{ repo: key, id: mcq.id, decision: "keep" }, { repo: key, id: flash.id, decision: "drop" }]);
+      expect(remote.calls.every((c) => c.opts?.timeout === 30_000)).toBe(true);
+      expect(readCard(key, mcq.id).status).toBe("kept");
+      expect(readCard(key, flash.id).status).toBe("dropped");
+      expect(readJsonl(key, "curation.jsonl")).toHaveLength(2);
+    });
+
+    it("sends a fix with the edited card's body", async () => {
+      const mcq = byKind("mcq");
+      if (mcq.body.kind !== "mcq") throw new Error("not mcq");
+      const body = { ...mcq.body, question: "What does applyReferral give back for a code it can't find?" };
+      writeCard(key, { ...mcq, body });
+      expect((await cli("curate", mcq.id, "fix")).out).toEqual({ id: mcq.id, status: "kept", reanchored: false });
+      expect(callsTo(remote, "curate_card")).toEqual([{ repo: key, id: mcq.id, decision: "fix", body }]);
+      expect(readCard(key, mcq.id)).toMatchObject({ status: "kept", body });
+    });
+
+    it("leaves the local file alone when the site refuses", async () => {
+      const mcq = byKind("mcq");
+      remote = fakeRemote({ fail: (tool) => (tool === "curate_card" ? new RemoteError("no card in this repo", "tool") : null) });
+      expect(await cli("curate", mcq.id, "keep")).toEqual({ code: 1, out: { error: "no card in this repo" } });
+      expect(readCard(key, mcq.id).status).toBe("draft");
+      expect(readJsonl(key, "curation.jsonl")).toEqual([]);
+    });
+
+    it("uploads a card the site doesn't have yet before curating it", async () => {
+      const late = { ...byKind("flashcard"), id: "late-1" };
+      writeCard(key, late);
+      await cli("curate", "late-1", "keep");
+      expect(remote.calls.map((c) => c.tool)).toEqual(["submit_cards", "curate_card"]);
+    });
+
+    it("sends a re-pointed card's new anchor right after the fix", async () => {
+      const flash = byKind("flashcard");
+      commit(repo, { "src/ref.ts": "// moved down\n\n" + FILE }, "docs: comment");
+      expect((await cli("curate", flash.id, "fix", "--path", "src/ref.ts", "--lines", "4-6")).out).toMatchObject({ reanchored: true, startLine: 4 });
+      expect(remote.calls.map((c) => c.tool)).toEqual(["curate_card", "submit_cards"]);
+      expect(submits(remote)[0].cards).toEqual([expect.objectContaining({ id: flash.id, status: "kept", anchor: expect.objectContaining({ startLine: 4, endLine: 6 }) })]);
+    });
+  });
+
+  describe("review", () => {
+    it("lists the site's due cards by their site ids, with the local card's anchor", async () => {
+      const [mcqSite, flashSite] = siteCards();
+      const stray = { id: "33333333-3333-4333-8333-333333333333", term: "Edited on the site", definition: "so no local copy matches" };
+      remote = fakeRemote({ answers: { get_due_cards: () => ({ deckId: "deck-1", cards: [mcqSite, flashSite, stray] }) } });
+      const mcq = byKind("mcq");
+      if (mcq.body.kind !== "mcq") throw new Error("not mcq");
+      writeCard(key, { ...readCard(key, byKind("flashcard").id), anchor: { ...byKind("flashcard").anchor, status: "changed" } });
+      const r = await cli("due", "--limit", "5");
+      expect(r).toEqual({
+        code: 0,
+        out: {
+          site: SITE, remote: true,
+          due: [
+            { id: MCQ_ID, localId: mcq.id, area: "src", path: "src/ref.ts", startLine: 1, endLine: 5, codeChanged: false, body: { kind: "mcq", question: mcq.body.question, choices: mcq.body.choices } },
+            { id: FLASH_ID, localId: byKind("flashcard").id, area: "src", path: "src/ref.ts", startLine: 2, endLine: 4, codeChanged: true, body: { kind: "flashcard", front: (byKind("flashcard").body as { front: string }).front } },
+            { id: stray.id, localId: null, area: null, path: null, startLine: null, endLine: null, codeChanged: false, body: { kind: "flashcard", front: "Edited on the site" } },
+          ],
+        },
+      });
+      expect(callsTo(remote, "get_due_cards")).toEqual([{ deckId: "deck-1" }]);
+      expect(remote.calls[0].opts).toEqual({ timeout: 30_000 });
+    });
+
+    it("gives the answer for a site id, from the due cards or else the deck", async () => {
+      const [mcqSite, flashSite] = siteCards();
+      const mcq = byKind("mcq");
+      if (mcq.body.kind !== "mcq") throw new Error("not mcq");
+      remote = fakeRemote({
+        answers: {
+          get_due_cards: () => ({ deckId: "deck-1", cards: [mcqSite] }),
+          get_deck: () => ({ id: "deck-1", cardCount: 2, cards: [mcqSite, flashSite], nextOffset: null }),
+        },
+      });
+      expect(await cli("answer", MCQ_ID)).toEqual({ code: 0, out: { id: MCQ_ID, kind: "mcq", correct: LETTERS[mcq.body.correctChoice], explanation: mcq.body.explanation } });
+      expect(remote.calls.map((c) => c.tool)).toEqual(["get_due_cards"]);
+      expect(await cli("answer", FLASH_ID)).toEqual({ code: 0, out: { id: FLASH_ID, kind: "flashcard", back: flashSite.definition } });
+      expect(callsTo(remote, "get_deck")).toEqual([{ deckId: "deck-1", offset: 0, limit: 200 }]);
+      expect(await cli("answer", "44444444-4444-4444-8444-444444444444")).toEqual({ code: 1, out: { error: "no card 44444444-4444-4444-8444-444444444444 in this repository" } });
+    });
+
+    it("shows a site id's code from the matching local card", async () => {
+      remote = fakeRemote({ answers: { get_due_cards: () => ({ deckId: "deck-1", cards: siteCards() }) } });
+      const mcq = byKind("mcq");
+      const shown = (await cli("show", MCQ_ID)).out as ShowOutput;
+      expect(shown).toMatchObject({ id: MCQ_ID, localId: mcq.id, path: "src/ref.ts", startLine: 1, endLine: 5, atHead: { symbolFound: true } });
+      expect(shown.atHead.lines).toBe(FILE.split("\n").slice(0, 5).join("\n"));
+      // A plugin id, as week prints, is shown from the local file without asking the site.
+      const calls = remote.calls.length;
+      expect((await cli("show", mcq.id)).out).toMatchObject({ id: mcq.id, path: "src/ref.ts" });
+      expect(remote.calls.length).toBe(calls);
+    });
+
+    it("records grades on the site", async () => {
+      remote = fakeRemote({ answers: { get_due_cards: () => ({ deckId: "deck-1", cards: siteCards() }) } });
+      expect(await cli("grade", MCQ_ID, "right")).toEqual({ code: 0, out: { id: MCQ_ID, recorded: true, site: SITE, remote: true } });
+      await cli("grade", FLASH_ID, "didnt-know");
+      await cli("grade", MCQ_ID, "wrong");
+      expect(callsTo(remote, "record_quiz_results")).toEqual([
+        { deckId: "deck-1", outcomes: [{ cardId: MCQ_ID, correct: true }] },
+        { deckId: "deck-1", outcomes: [{ cardId: FLASH_ID, correct: false }] },
+        { deckId: "deck-1", outcomes: [{ cardId: MCQ_ID, correct: false }] },
+      ]);
+      expect(remote.calls.every((c) => c.opts?.timeout === 30_000)).toBe(true);
+      expect(readJsonl(key, "reviews.jsonl")).toEqual([]);
+    });
+
+    it("refuses to grade a plugin id or a card the site doesn't have", async () => {
+      const mcq = byKind("mcq");
+      expect(await cli("grade", mcq.id, "right")).toMatchObject({ code: 1, out: { error: expect.stringMatching(/repobrain due/) } });
+      expect(await cli("grade", "44444444-4444-4444-8444-444444444444", "right")).toMatchObject({ code: 1, out: { error: expect.stringMatching(/^no card/) } });
+      expect(callsTo(remote, "record_quiz_results")).toEqual([]);
+    });
+
+    it("keeps stats local", async () => {
+      expect((await cli("stats")).out).toMatchObject({ cards: 2, draft: 2 });
+      expect(connects).toBe(0);
+    });
+  });
+});
+
+describe("cli with an unlinked repo", () => {
+  it("never connects to the site", async () => {
+    useTempHome();
+    const repo = makeRepo();
+    commit(repo, { "src/ref.ts": FILE }, "feat: referral codes");
+    const connect = async (): Promise<never> => {
+      throw new Error("connected");
+    };
+    const cli = (...argv: string[]) => main([...argv, "--repo", repo], { now, run, connect });
+    await cli("connect");
+    await cli("capture", "--since", "1 year ago", "--no-fetch");
+    const week = (await cli("week")).out as WeekOutput;
+    expect(week).not.toHaveProperty("remote");
+    const id = week.areas["src"][0].cards[0].id;
+    expect((await cli("curate", id, "keep")).code).toBe(0);
+    expect(((await cli("due")).out as DueOutput).due.map((d) => d.id)).toEqual([id]);
+    expect((await cli("answer", id)).code).toBe(0);
+    expect((await cli("grade", id, "right")).out).toMatchObject({ id, nextDue: expect.any(String) });
   });
 });

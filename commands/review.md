@@ -6,6 +6,8 @@ If `repobrain` isn't found, say the plugin's CLI isn't built or installed: run `
 
 Run `repobrain due --limit 10`. If it fails, show the error and stop; if it says the repository isn't connected, suggest `/repobrain:connect`. If `due` is empty, say nothing is due in one line and stop.
 
+When the output has `site`, the repository is linked to the RepoBrain site: grades are saved there and the site schedules the reviews, so use each card's `id` exactly as `due` printed it.
+
 `due` gives questions only. Ask one card at a time:
 - Multiple choice (`body.kind: "mcq"`): show the question and the four choices labelled A-D.
 - Flashcard: show the front.

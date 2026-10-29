@@ -6,6 +6,8 @@ If `repobrain` isn't found, say the plugin's CLI isn't built or installed: run `
 
 Run `repobrain week`. If it fails, show the error and stop; if it says the repository isn't connected, suggest `/repobrain:connect`.
 
+When the output has `site`, the repository is linked to the RepoBrain site: decisions are saved there and also show on the `weekUrl` page; if it has `remoteError` (or `loginHint`), say first that the site couldn't be used and show that message, since the cards shown are then this machine's copies.
+
 Report problems first:
 - `claudeUnavailable`: new merges aren't being drafted; claude has been unavailable since `since`. Show `message` and suggest checking that `claude` is installed and logged in.
 - `lastCaptureError`: the last capture run failed unexpectedly at `at` (a git error, say), so new merges may not be drafted. Show `message`. If it mentions a pathspec or `.repobrain/ignore`, suggest checking that file's lines: one git glob per line, no `!` lines. It clears once a capture completes.

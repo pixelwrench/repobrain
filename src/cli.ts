@@ -10,13 +10,13 @@ import { runCapture, type CaptureReport } from "./capture.js";
 import { areaOf, CARD_SOURCES, LETTERS, type Anchor, type AnchorStatus, type Card, type CardBody, type CardSource, type CardStatus } from "./format.js";
 import type { RunClaude } from "./generate.js";
 import { defaultBranch, fileAt, resolveCommit } from "./git.js";
-import { connectRemote, type Remote } from "./remote.js";
+import { connectRemote, RemoteError, toRemoteError, type Remote } from "./remote.js";
 import { dueCards, loadSchedule, recordGrade, type Grade } from "./schedule.js";
 import {
-  appendJsonl, appendLog, cardPath, connectRepo, findRepo, home, isSafeId, listCardsReport, readCard, readJsonl, readState, writeCard,
-  type CardListing, type RepoState,
+  acquireLock, appendJsonl, appendLog, cardPath, connectRepo, findRepo, home, isSafeId, listCardsReport, readCard, readJsonl, readState, writeCard,
+  type CardListing, type RemoteLink, type RepoState,
 } from "./store.js";
-import { linkRepo, unlinkRepo, type LinkOutput, type UnlinkOutput } from "./sync.js";
+import { linkRepo, setRemoteAuth, submitPending, SYNC_BUDGET_MS, unlinkRepo, type LinkOutput, type UnlinkOutput } from "./sync.js";
 
 // ---- Output shapes: every command prints one of these as JSON on stdout. ----
 
@@ -71,6 +71,22 @@ export interface WeekOutput {
   /** Why state.json couldn't be read (corrupt), or null when it reads fine. */
   stateError: string | null;
 }
+/**
+ * `week` in a repo linked to the site: the site's week (its drafts and flagged cards, plus the deck's lesson)
+ * with this machine's capture status, or, when the site can't be reached, the local week with `remoteError`.
+ */
+export type RemoteWeekOutput = WeekOutput & {
+  site: string;
+  /** The site's page for this week's cards, where decisions made here also show. */
+  weekUrl: string;
+  /** True when the cards came from the site. */
+  remote: boolean;
+  lesson?: { title: string; deckId: string } | null;
+  /** Why the site couldn't be used; the cards shown are the local copies. */
+  remoteError?: string;
+  /** Set while the site refuses this machine's sign-in. */
+  loginHint?: string;
+};
 /** A kept card whose code changed is re-anchored at the default branch's head, and then carries its new range. */
 export type CurateOutput =
   | { id: string; status: "kept" | "dropped"; reanchored: false }
@@ -89,9 +105,36 @@ export interface DueCard {
 export interface DueOutput {
   due: DueCard[];
 }
+/**
+ * A due card in a linked repo. `id` is the site's card id, which show, answer and grade take. `localId` is
+ * the local card with the same question, which gives the anchor; when none matches (the card was edited on
+ * the site) it and the anchor fields are null.
+ */
+export interface RemoteDueCard {
+  id: string;
+  localId: string | null;
+  area: string | null;
+  path: string | null;
+  startLine: number | null;
+  endLine: number | null;
+  codeChanged: boolean;
+  body: DueBody;
+}
+export interface RemoteDueOutput {
+  due: RemoteDueCard[];
+  site: string;
+  remote: true;
+}
 export interface GradeOutput {
   id: string;
   nextDue: string;
+}
+/** `grade` in a linked repo: the site schedules the card, and doesn't say when it's next due. */
+export interface RemoteGradeOutput {
+  id: string;
+  recorded: boolean;
+  site: string;
+  remote: true;
 }
 /** Card and curation counts for the cards from one source. */
 export interface SourceStats {
@@ -130,6 +173,8 @@ export interface CardOutput {
 export type AnswerOutput = { id: string; kind: "mcq"; correct: string; explanation: string } | { id: string; kind: "flashcard"; back: string };
 export interface ShowOutput {
   id: string;
+  /** With a site id in a linked repo: the local card whose code is shown. */
+  localId?: string;
   status: CardStatus;
   anchor: AnchorStatus;
   /** The card's stored anchor. */
@@ -163,8 +208,8 @@ export type BaselineStatusOutput = BaselineStatus;
 export type BaselineAreaOutput = BaselineArea;
 
 export type CliOutput =
-  | ErrorOutput | CurateUnreadable | ConnectOutput | CaptureOutput | WeekOutput | CurateOutput
-  | DueOutput | GradeOutput | StatsOutput | CardOutput | AnswerOutput | ShowOutput
+  | ErrorOutput | CurateUnreadable | ConnectOutput | CaptureOutput | WeekOutput | RemoteWeekOutput | CurateOutput
+  | DueOutput | RemoteDueOutput | GradeOutput | RemoteGradeOutput | StatsOutput | CardOutput | AnswerOutput | ShowOutput
   | BaselinePlanOutput | BaselineDraftOutput | BaselineStatusOutput | BaselineAreaOutput | LoginOutput | LinkOutput | UnlinkOutput;
 
 export interface CliResult {
@@ -214,11 +259,11 @@ function count(value: string | undefined): number | undefined | null {
   return /^\d+$/.test(value) && Number(value) >= 1 ? Number(value) : null;
 }
 
-function connected(repo: string | undefined): { key: string; repoPath: string; areaDepth: number } {
+function connected(repo: string | undefined): { key: string; repoPath: string; areaDepth: number; link: RemoteLink | undefined } {
   const dir = path.resolve(repo ?? process.cwd());
   const found = findRepo(dir);
   if (!found) throw new Error(`${dir} is not connected to RepoBrain; run \`repobrain connect\` there first`);
-  return { key: found.key, repoPath: found.config.path, areaDepth: found.config.areaDepth };
+  return { key: found.key, repoPath: found.config.path, areaDepth: found.config.areaDepth, link: found.config.remote };
 }
 
 /** A relative path inside the repo with no `..`, normalised; null when unsafe. */
@@ -311,6 +356,176 @@ function locate(repoPath: string, a: Anchor, head: string) {
     else shift = newLine - oldLine;
   }
   return { content, startLine: a.startLine + shift, endLine: a.endLine + shift, symbolMissing };
+}
+
+// ---- Remote mode: a repo linked to the site uses the site's week, curation and reviews. ----
+
+/** How long one call to the site may take, connecting included. */
+const SITE_TIMEOUT_MS = 30_000;
+const timed = { timeout: SITE_TIMEOUT_MS };
+const LOGIN_HINT = "the site refused this machine's sign-in, or it expired: run repobrain login";
+
+/** A card as the site's get_due_cards and get_deck list it: an mcq's `definition` is its correct choice. */
+interface SiteCard {
+  id: string;
+  kind?: string;
+  term: string;
+  definition: string;
+  choices?: string[];
+  explanation?: string | null;
+}
+
+/** `p`, or a network error once `ms` pass first; a Remote that connects after that is closed. */
+function connectWithin(p: Promise<Remote>, ms: number): Promise<Remote> {
+  let late = false;
+  let timer: NodeJS.Timeout | undefined;
+  p.then((r) => (late ? r.close().catch(() => {}) : undefined), () => {});
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => ((late = true), reject(new RemoteError(`the site didn't answer within ${ms / 1000}s`, "network"))), ms);
+    timer.unref();
+  });
+  return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
+}
+
+const weekUrl = (link: RemoteLink): string => `${link.site}/repos/${encodeURIComponent(link.repoId)}/week`;
+
+/** Connects to the linked site with the stored sign-in, runs `fn`, and closes the connection. */
+async function withSite<T>(link: RemoteLink, deps: CliDeps, fn: (remote: Remote) => Promise<T>): Promise<T> {
+  if (!isSignedIn(link.site)) throw new RemoteError(`not signed in to ${link.site}: run repobrain login --site ${link.site}`, "auth");
+  const remote = await connectWithin((deps.connect ?? connectRemote)(link.site), SITE_TIMEOUT_MS);
+  try {
+    return await fn(remote);
+  } finally {
+    await remote.close().catch(() => {});
+  }
+}
+
+/** Uploads the cards the site doesn't have as they are now. Skipped while a capture holds the lock: it uploads them itself. */
+async function uploadPending(key: string, remote: Remote): Promise<void> {
+  const lock = acquireLock(key);
+  if (!lock) return;
+  try {
+    await submitPending(key, remote, { signal: AbortSignal.timeout(SYNC_BUDGET_MS), refresh: lock.refresh });
+  } finally {
+    lock.release();
+  }
+}
+
+/** Records whether the site accepts the sign-in; an unwritable or corrupt state.json only loses the mark. */
+function markAuth(key: string, expired: boolean): void {
+  try {
+    setRemoteAuth(key, expired);
+  } catch {
+    // stateStatus reports a corrupt state.json.
+  }
+}
+
+function authExpired(key: string): boolean {
+  try {
+    return readState(key).remoteAuth === "expired";
+  } catch {
+    return false;
+  }
+}
+
+const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+
+function checkWeek(v: unknown): WeekOutput & { lesson?: RemoteWeekOutput["lesson"] } {
+  if (!isObj(v) || typeof v.drafts !== "number" || typeof v.flagged !== "number" || !isObj(v.areas)) {
+    throw new RemoteError("get_week returned an unexpected result", "tool");
+  }
+  return v as unknown as WeekOutput;
+}
+
+function checkCards(tool: string, v: unknown): SiteCard[] {
+  const cards = isObj(v) ? v.cards : undefined;
+  const ok = Array.isArray(cards) && cards.every((c) => isObj(c) && typeof c.id === "string" && typeof c.term === "string" && typeof c.definition === "string");
+  if (!ok) throw new RemoteError(`${tool} returned an unexpected result`, "tool");
+  return cards as SiteCard[];
+}
+
+/** The deck's due cards. A deck the site has locked is an error, not an empty list. */
+async function siteDue(remote: Remote, deckId: string): Promise<SiteCard[]> {
+  const res = await remote.call<unknown>("get_due_cards", { deckId }, timed);
+  if (isObj(res) && res.locked === true) throw new RemoteError(typeof res.message === "string" ? res.message : "the site has locked this deck", "tool");
+  return checkCards("get_due_cards", res);
+}
+
+const DECK_PAGE = 200;
+
+/** One of the deck's cards by its site id: from the due cards (where a review's cards are), else the whole deck. */
+async function findSiteCard(remote: Remote, deckId: string, id: string): Promise<SiteCard | null> {
+  const due = (await siteDue(remote, deckId)).find((c) => c.id === id);
+  if (due) return due;
+  for (let offset: number | null = 0, pages = 0; offset !== null && pages < 100; pages++) {
+    const res: unknown = await remote.call<unknown>("get_deck", { deckId, offset, limit: DECK_PAGE }, timed);
+    const hit = checkCards("get_deck", res).find((c) => c.id === id);
+    if (hit) return hit;
+    const next: unknown = isObj(res) ? res.nextOffset : null;
+    offset = typeof next === "number" && next > offset ? next : null;
+  }
+  return null;
+}
+
+const isMcq = (c: SiteCard): boolean => c.kind === "MULTIPLE_CHOICE";
+
+/** A site card's question side, as `due` prints it. */
+const siteQuestion = (c: SiteCard): DueBody =>
+  isMcq(c) ? { kind: "mcq", question: c.term, choices: c.choices ?? [] } : { kind: "flashcard", front: c.term };
+
+/** What a card asks, as the site stores it (trimmed), so a site card can be matched to its local file. */
+const questionKey = (q: DueBody): string =>
+  JSON.stringify(q.kind === "mcq" ? ["mcq", q.question.trim(), q.choices.map((c) => c.trim())] : ["flashcard", q.front.trim()]);
+
+/** The local card asking the same question as a site card: a kept one first, then any not dropped. */
+function localMatch(cards: Card[], c: SiteCard): Card | null {
+  const want = questionKey(siteQuestion(c));
+  const same = cards.filter((l) => questionKey(questionOf(l.body)) === want);
+  return same.find((l) => l.status === "kept") ?? same.find((l) => l.status !== "dropped") ?? same[0] ?? null;
+}
+
+/** The card body as curate_card takes it (the same shape as a submitted card's body). */
+const siteBody = (b: CardBody): CardBody =>
+  b.kind === "mcq"
+    ? { kind: "mcq", question: b.question, choices: b.choices, correctChoice: b.correctChoice, explanation: b.explanation }
+    : { kind: "flashcard", front: b.front, back: b.back };
+
+async function curateOnSite(remote: Remote, key: string, id: string, decision: Decision, body?: CardBody): Promise<"kept" | "dropped"> {
+  const res = await remote.call<unknown>("curate_card", { repo: key, id, decision, ...(body ? { body: siteBody(body) } : {}) }, timed);
+  const curation = isObj(res) ? res.curation : undefined;
+  if (curation !== "kept" && curation !== "dropped") throw new RemoteError("curate_card returned an unexpected result", "tool");
+  return curation;
+}
+
+/** Whether the site has been sent this card (a corrupt state.json counts as yes: the site then says if it hasn't). */
+function wasSubmitted(key: string, id: string): boolean {
+  try {
+    return readState(key).submitted?.[id] !== undefined;
+  } catch {
+    return true;
+  }
+}
+
+/** The week from the local card files: drafts and flagged cards, grouped by area and then by change. */
+function localWeek(key: string): WeekOutput {
+  const { cards, unreadable } = listCardsReport(key);
+  // Everything waiting for the user: all drafts, plus kept cards whose code changed or was removed.
+  const items = cards.filter((c) => c.status === "draft" || (c.status === "kept" && c.anchor.status !== "fresh"));
+  const areas: Record<string, WeekGroup[]> = {};
+  for (const c of items) {
+    const groups = (areas[c.area] ??= []);
+    // Baseline areas share one commit, so the title tells them apart.
+    let group = groups.find((g) => g.merge === c.merge && g.title === c.mergeTitle);
+    if (!group) groups.push((group = { merge: c.merge, title: c.mergeTitle, source: c.source, cards: [] }));
+    group.cards.push({
+      id: c.id, status: c.status, anchor: c.anchor.status, path: c.anchor.path, startLine: c.anchor.startLine, endLine: c.anchor.endLine,
+      symbol: c.anchor.symbol, body: bodyOutput(c.body),
+    });
+  }
+  return {
+    drafts: items.filter((c) => c.status === "draft").length, flagged: items.filter((c) => c.status === "kept").length, areas, unreadable,
+    ...stateStatus(key),
+  };
 }
 
 export async function main(argv: string[], deps: CliDeps = {}): Promise<CliResult> {
@@ -409,25 +624,26 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
       }
     }
     case "week": {
-      const { key } = connected(values.repo);
-      const { cards, unreadable } = listCardsReport(key);
-      // Everything waiting for the user: all drafts, plus kept cards whose code changed or was removed.
-      const items = cards.filter((c) => c.status === "draft" || (c.status === "kept" && c.anchor.status !== "fresh"));
-      const areas: Record<string, WeekGroup[]> = {};
-      for (const c of items) {
-        const groups = (areas[c.area] ??= []);
-        // Baseline areas share one commit, so the title tells them apart.
-        let group = groups.find((g) => g.merge === c.merge && g.title === c.mergeTitle);
-        if (!group) groups.push((group = { merge: c.merge, title: c.mergeTitle, source: c.source, cards: [] }));
-        group.cards.push({
-          id: c.id, status: c.status, anchor: c.anchor.status, path: c.anchor.path, startLine: c.anchor.startLine, endLine: c.anchor.endLine,
-          symbol: c.anchor.symbol, body: bodyOutput(c.body),
+      const { key, link } = connected(values.repo);
+      const local = localWeek(key);
+      if (!link) return ok(local);
+      let out: RemoteWeekOutput;
+      try {
+        const week = await withSite(link, deps, async (remote) => {
+          // Connecting sends the stored token, so the site has accepted the sign-in.
+          markAuth(key, false);
+          await uploadPending(key, remote);
+          return checkWeek(await remote.call<unknown>("get_week", { repo: key }, timed));
         });
+        // The site never sees this machine's card files or capture runs: those come from here.
+        const { unreadable, claudeUnavailable, lastCaptureError, stateError } = local;
+        out = { ...week, unreadable, claudeUnavailable, lastCaptureError, stateError, site: link.site, weekUrl: weekUrl(link), remote: true };
+      } catch (e) {
+        const err = toRemoteError(e);
+        if (err.kind === "auth") markAuth(key, true);
+        out = { ...local, site: link.site, weekUrl: weekUrl(link), remote: false, remoteError: err.message };
       }
-      const out: WeekOutput = {
-        drafts: items.filter((c) => c.status === "draft").length, flagged: items.filter((c) => c.status === "kept").length, areas, unreadable,
-        ...stateStatus(key),
-      };
+      if (authExpired(key)) out.loginHint = LOGIN_HINT;
       return ok(out);
     }
     case "curate": {
@@ -446,7 +662,31 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
         if (range === null) return usage("--lines must be S-E with positive integers and S <= E");
         target = { path: p, ...range };
       }
-      const { key, repoPath, areaDepth } = connected(values.repo);
+      const { key, repoPath, areaDepth, link } = connected(values.repo);
+      /**
+       * Saves the decision. In a linked repo the site takes it first (a fix with the card file's text), so a
+       * refusal leaves the local file as it was; a card the site hasn't been sent yet is uploaded before, and
+       * a moved anchor straight after.
+       */
+      const save = async (next: Card, out: CurateOutput): Promise<CliResult> => {
+        const write = () => {
+          writeCard(key, next);
+          appendJsonl(key, "curation.jsonl", { card: id, decision, at: now().toISOString() });
+        };
+        if (!link) {
+          write();
+          return ok(out);
+        }
+        const status = await withSite(link, deps, async (remote) => {
+          if (!wasSubmitted(key, id)) await uploadPending(key, remote);
+          const curation = await curateOnSite(remote, key, id, decision, decision === "fix" ? next.body : undefined);
+          write();
+          // The site takes a kept card's anchor from a resubmit; if this fails, the next capture or week sends it.
+          if (out.reanchored) await uploadPending(key, remote).catch(() => {});
+          return curation;
+        });
+        return ok({ ...out, status } as CurateOutput);
+      };
       const found = lookupCard(key, id);
       if ("missing" in found) return noCard(id);
       if ("reason" in found) {
@@ -475,9 +715,10 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
             `can't anchor ${id} at ${target.path}:${target.start}-${target.end} on ${tip.branch}: the file is missing there, or those lines are out of range or too trivial`,
           );
         }
-        writeCard(key, { ...card, status: "kept", area: areaOf(moved.path, areaDepth), anchor: moved });
-        appendJsonl(key, "curation.jsonl", { card: id, decision, at: now().toISOString() });
-        return ok({ id, status: "kept", reanchored: true, path: moved.path, startLine: moved.startLine, endLine: moved.endLine } satisfies CurateOutput);
+        return save(
+          { ...card, status: "kept", area: areaOf(moved.path, areaDepth), anchor: moved },
+          { id, status: "kept", reanchored: true, path: moved.path, startLine: moved.startLine, endLine: moved.endLine },
+        );
       }
       let out: CurateOutput = { id, status: decision === "drop" ? "dropped" : "kept", reanchored: false };
       let anchor = card.anchor;
@@ -490,14 +731,28 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
           out = { id, status: "kept", reanchored: true, path: moved.path, startLine: moved.startLine, endLine: moved.endLine };
         }
       }
-      writeCard(key, { ...card, status: out.status, anchor });
-      appendJsonl(key, "curation.jsonl", { card: id, decision, at: now().toISOString() });
-      return ok(out);
+      return save({ ...card, status: out.status, anchor }, out);
     }
     case "due": {
       const limit = count(values.limit);
       if (limit === null) return usage("--limit must be a positive integer");
-      const { key } = connected(values.repo);
+      const { key, link } = connected(values.repo);
+      if (link) {
+        const site = await withSite(link, deps, (remote) => siteDue(remote, link.deckId));
+        const cards = listCardsReport(key).cards;
+        const out: RemoteDueOutput = {
+          due: site.slice(0, limit ?? 10).map((c) => {
+            const l = localMatch(cards, c);
+            return {
+              id: c.id, localId: l?.id ?? null, area: l?.area ?? null, path: l?.anchor.path ?? null, startLine: l?.anchor.startLine ?? null,
+              endLine: l?.anchor.endLine ?? null, codeChanged: l?.anchor.status === "changed", body: siteQuestion(c),
+            };
+          }),
+          site: link.site,
+          remote: true,
+        };
+        return ok(out);
+      }
       const due = dueCards(listCardsReport(key).cards, loadSchedule(key), now()).slice(0, limit ?? 10);
       const out: DueOutput = {
         due: due.map((c) => ({
@@ -511,8 +766,18 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
       const [id, grade] = positionals;
       if (!id || !GRADES.includes(grade ?? "") || positionals.length > 2) return usage("usage: repobrain grade <id> right|wrong|didnt-know");
       if (!isSafeId(id)) return badId(id);
-      const { key } = connected(values.repo);
+      const { key, link } = connected(values.repo);
       const found = lookupCard(key, id);
+      if (link) {
+        // The site schedules a linked repo's reviews, by its own card ids.
+        if (!("missing" in found)) return fail(`${id} is a local card id; this repository is linked to ${link.site}, so grade the id \`repobrain due\` printed`);
+        return withSite(link, deps, async (remote) => {
+          if (!(await findSiteCard(remote, link.deckId, id))) return noCard(id);
+          const res = await remote.call<unknown>("record_quiz_results", { deckId: link.deckId, outcomes: [{ cardId: id, correct: grade === "right" }] }, timed);
+          const recorded = isObj(res) && typeof res.recorded === "number" && res.recorded > 0;
+          return ok({ id, recorded, site: link.site, remote: true } satisfies RemoteGradeOutput);
+        });
+      }
       if ("missing" in found) return noCard(id);
       if ("reason" in found) return fail(`card ${id} can't be read: ${found.reason}`);
       if (found.card.status !== "kept") return fail(`card ${id} is ${found.card.status}; only kept cards are reviewed`);
@@ -552,8 +817,18 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
       const id = positionals[0];
       if (!id || positionals.length > 1) return usage("usage: repobrain show <id>");
       if (!isSafeId(id)) return badId(id);
-      const { key, repoPath } = connected(values.repo);
-      const found = lookupCard(key, id);
+      const { key, repoPath, link } = connected(values.repo);
+      let found = lookupCard(key, id);
+      let localId: string | undefined;
+      if ("missing" in found && link) {
+        // A site id, from `due`: the code comes from the local card asking the same question.
+        const site = await withSite(link, deps, (remote) => findSiteCard(remote, link.deckId, id));
+        if (!site) return noCard(id);
+        const match = localMatch(listCardsReport(key).cards, site);
+        if (!match) return fail(`card ${id} matches no card file in this repository; it may have been edited on the site`);
+        found = { card: match };
+        localId = match.id;
+      }
       if ("missing" in found) return noCard(id);
       if ("reason" in found) return fail(`card ${id} can't be read: ${found.reason}`);
       const { card } = found;
@@ -570,7 +845,7 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
       }
       const symbolFound = a.symbol !== null && at.content !== null && !at.symbolMissing;
       const out: ShowOutput = {
-        id, status: card.status, anchor: a.status, path: a.path, startLine: a.startLine, endLine: a.endLine,
+        id, ...(localId ? { localId } : {}), status: card.status, anchor: a.status, path: a.path, startLine: a.startLine, endLine: a.endLine,
         atHead: { commit: tip.head, startLine, endLine, symbolFound, lines: blockText(at.content, startLine, endLine) },
         atCommit: { commit: a.commit, lines: blockText(fileAt(repoPath, a.commit, a.path), a.startLine, a.endLine) },
       };
@@ -580,8 +855,17 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
       const id = positionals[0];
       if (!id || positionals.length > 1) return usage("usage: repobrain answer <id>");
       if (!isSafeId(id)) return badId(id);
-      const { key } = connected(values.repo);
+      const { key, link } = connected(values.repo);
       const found = lookupCard(key, id);
+      if ("missing" in found && link) {
+        // A site id, from `due`: the answer is the site's copy of the card.
+        const site = await withSite(link, deps, (remote) => findSiteCard(remote, link.deckId, id));
+        if (!site) return noCard(id);
+        if (!isMcq(site)) return ok({ id, kind: "flashcard", back: site.definition } satisfies AnswerOutput);
+        const correct = (site.choices ?? []).indexOf(site.definition);
+        if (correct < 0 || correct >= LETTERS.length) return fail(`card ${id} on the site has no correct choice among its choices`);
+        return ok({ id, kind: "mcq", correct: LETTERS[correct], explanation: site.explanation ?? "" } satisfies AnswerOutput);
+      }
       if ("missing" in found) return noCard(id);
       if ("reason" in found) return fail(`card ${id} can't be read: ${found.reason}`);
       const { card } = found;

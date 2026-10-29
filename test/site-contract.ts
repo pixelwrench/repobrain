@@ -49,9 +49,33 @@ export const updateAnchorsInput = z.object({
     .max(2000),
 });
 
+export const getWeekInput = z.object({ repo: repoKey });
+export const curateCardInput = z.object({
+  repo: repoKey,
+  id: submittedCard.shape.id,
+  decision: z.enum(["keep", "fix", "drop"]),
+  // Only with "fix": the corrected card. Same shape as a submitted body.
+  body: body.optional(),
+});
+
+// The site's existing quiz tools (web/src/server/mcp/tools.ts).
+export const getDueCardsInput = z.object({ deckId: z.string().min(1).optional() });
+export const getDeckInput = z.object({ deckId: z.string().min(1), offset: z.number().int().min(0).optional(), limit: z.number().int().min(1).max(200).optional() });
+export const recordQuizResultsInput = z.object({
+  deckId: z.string().min(1),
+  outcomes: z.array(z.object({ cardId: z.string().min(1), correct: z.boolean() })).min(1).max(500),
+});
+
+const strictBody = z.discriminatedUnion("kind", [body.options[0].strict(), body.options[1].strict()]);
+
 /** Each tool's input, strict, so an extra or misspelt field fails a test too. */
 export const toolInputs: Record<string, z.ZodType> = {
   link_repo: linkRepoInput.strict(),
   submit_cards: submitCardsInput.extend({ cards: z.array(submittedCard.strict()).max(20) }).strict(),
   update_anchors: updateAnchorsInput.strict(),
+  get_week: getWeekInput.strict(),
+  curate_card: curateCardInput.extend({ body: strictBody.optional() }).strict(),
+  get_due_cards: getDueCardsInput.strict(),
+  get_deck: getDeckInput.strict(),
+  record_quiz_results: recordQuizResultsInput.extend({ outcomes: z.array(recordQuizResultsInput.shape.outcomes.element.strict()).min(1).max(500) }).strict(),
 };
