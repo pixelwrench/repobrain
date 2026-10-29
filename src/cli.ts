@@ -346,6 +346,7 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
   switch (command) {
     case "login":
     case "logout": {
+      if (positionals.length > 0) return usage(`unexpected argument ${JSON.stringify(positionals[0])}\n${USAGE}`);
       let site: string;
       try {
         site = resolveSite(values.site);

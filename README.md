@@ -116,7 +116,7 @@ The plugin puts the `repobrain` CLI on the PATH of Claude Code's Bash tool. Outs
 | `login [--site URL]` | Signs in to the RepoBrain site in your browser (OAuth with PKCE, redirecting back to a one-off listener on 127.0.0.1), and stores the tokens in `auth.json`. Waits up to 5 minutes. Tokens are never printed. |
 | `logout [--site URL]` | Forgets that site's sign-in. Other sites are kept. |
 
-The site is `--site`, else `REPOBRAIN_SITE`, else `https://repobrain.com`. Until the site is deployed, use `--site http://localhost:3000` against a local copy. Plain `http` is accepted only for `localhost` and `127.0.0.1`.
+The site is `--site`, else `REPOBRAIN_SITE`, else `https://repobrain.com`. Until the site is deployed, use `--site http://localhost:3000` against a local copy. Plain `http` is accepted only for `localhost`, `127.0.0.1` and `[::1]`.
 
 ## Files
 

@@ -25528,13 +25528,14 @@ var FileOAuthProvider = class {
   }
 };
 var PAGE = (heading, text) => `<!doctype html><meta charset="utf-8"><title>RepoBrain</title><h1>${heading}</h1><p>${text}</p>`;
-async function listenForCallback() {
+async function listenForCallback(expectedState) {
   let deliver = () => {
   };
   const received = new Promise((resolve) => deliver = resolve);
   const server = http.createServer((req, res) => {
     const url2 = new URL(req.url ?? "/", "http://127.0.0.1");
-    if (url2.pathname !== "/callback") {
+    const state = expectedState();
+    if (url2.pathname !== "/callback" || state === void 0 || url2.searchParams.get("state") !== state) {
       res.writeHead(404).end();
       return;
     }
@@ -25563,33 +25564,38 @@ async function listenForCallback() {
     }
   };
 }
-async function openInBrowser(url2) {
+function mayOpen(url2) {
+  return url2.protocol === "https:" || url2.protocol === "http:" && LOOPBACK_HOSTS.has(url2.hostname);
+}
+async function openInBrowser(url2, spawnFn = spawn) {
+  if (!mayOpen(url2)) return false;
   const command = process.platform === "darwin" ? "open" : "xdg-open";
-  await new Promise((resolve) => {
+  return new Promise((resolve) => {
     try {
-      const child = spawn(command, [url2.toString()], { stdio: "ignore", detached: true });
-      child.once("error", () => resolve());
+      const child = spawnFn(command, [url2.toString()], { stdio: "ignore", detached: true });
+      child.once("error", () => resolve(false));
       child.once("spawn", () => {
         child.unref();
-        resolve();
+        resolve(true);
       });
     } catch {
-      resolve();
+      resolve(false);
     }
   });
 }
 async function login(site, deps = {}) {
   const flow = deps.authFlow ?? auth;
-  const authFlow = (provider, options) => flow(provider, options).catch((e) => {
+  const authFlow = (provider2, options) => flow(provider2, options).catch((e) => {
     throw toRemoteError(e, "auth");
   });
   const openBrowser = deps.openBrowser ?? openInBrowser;
   const notify = deps.notify ?? ((m) => process.stderr.write(m + "\n"));
   const connect = deps.connect ?? ((s, authProvider) => connectRemote(s, { authProvider }));
   const serverUrl = mcpUrl(site);
-  const listener = await listenForCallback();
+  let provider;
+  const listener = await listenForCallback(() => provider?.expectedState);
   try {
-    const provider = new FileOAuthProvider(site, {
+    provider = new FileOAuthProvider(site, {
       redirectUrl: listener.redirectUrl,
       onRedirect: async (url2) => {
         notify(`Sign in to RepoBrain in your browser. If it doesn't open, visit:
@@ -28498,6 +28504,8 @@ ${USAGE}`);
   switch (command) {
     case "login":
     case "logout": {
+      if (positionals.length > 0) return usage(`unexpected argument ${JSON.stringify(positionals[0])}
+${USAGE}`);
       let site;
       try {
         site = resolveSite(values.site);

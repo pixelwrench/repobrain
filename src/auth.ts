@@ -214,13 +214,17 @@ interface CallbackListener {
 const PAGE = (heading: string, text: string): string =>
   `<!doctype html><meta charset="utf-8"><title>RepoBrain</title><h1>${heading}</h1><p>${text}</p>`;
 
-/** Listens on 127.0.0.1 at a free port, before the flow starts, so the redirect URL is known. */
-async function listenForCallback(): Promise<CallbackListener> {
+/**
+ * Listens on 127.0.0.1 at a free port, before the flow starts, so the redirect URL is known. Only a callback
+ * carrying this sign-in's state counts; any other request gets a 404 and the wait goes on.
+ */
+async function listenForCallback(expectedState: () => string | undefined): Promise<CallbackListener> {
   let deliver: (params: URLSearchParams) => void = () => {};
   const received = new Promise<URLSearchParams>((resolve) => (deliver = resolve));
   const server = http.createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
-    if (url.pathname !== "/callback") {
+    const state = expectedState();
+    if (url.pathname !== "/callback" || state === undefined || url.searchParams.get("state") !== state) {
       res.writeHead(404).end();
       return;
     }
@@ -250,19 +254,28 @@ async function listenForCallback(): Promise<CallbackListener> {
   };
 }
 
-/** Opens the URL with the system's opener, ignoring failures: the URL is printed too. */
-export async function openInBrowser(url: URL): Promise<void> {
+/** https anywhere, or http on this machine: the only URLs handed to the system opener. */
+function mayOpen(url: URL): boolean {
+  return url.protocol === "https:" || (url.protocol === "http:" && LOOPBACK_HOSTS.has(url.hostname));
+}
+
+/**
+ * Opens the URL with the system's opener, ignoring failures: the URL is printed too. Returns whether the
+ * opener started. Any other kind of URL is left for the user to open from the printed text.
+ */
+export async function openInBrowser(url: URL, spawnFn: typeof spawn = spawn): Promise<boolean> {
+  if (!mayOpen(url)) return false;
   const command = process.platform === "darwin" ? "open" : "xdg-open";
-  await new Promise<void>((resolve) => {
+  return new Promise<boolean>((resolve) => {
     try {
-      const child = spawn(command, [url.toString()], { stdio: "ignore", detached: true });
-      child.once("error", () => resolve());
+      const child = spawnFn(command, [url.toString()], { stdio: "ignore", detached: true });
+      child.once("error", () => resolve(false));
       child.once("spawn", () => {
         child.unref();
-        resolve();
+        resolve(true);
       });
     } catch {
-      resolve();
+      resolve(false);
     }
   });
 }
@@ -277,7 +290,7 @@ export type AuthFlow = (
 
 export interface LoginDeps {
   authFlow?: AuthFlow;
-  openBrowser?: (url: URL) => Promise<void>;
+  openBrowser?: (url: URL) => Promise<unknown>;
   connect?: (site: string, provider: OAuthClientProvider) => Promise<Remote>;
   /** Where the sign-in URL is shown. stdout carries the command's JSON, so this defaults to stderr. */
   notify?: (message: string) => void;
@@ -301,9 +314,10 @@ export async function login(site: string, deps: LoginDeps = {}): Promise<LoginOu
   const connect = deps.connect ?? ((s: string, authProvider: OAuthClientProvider) => connectRemote(s, { authProvider }));
   const serverUrl = mcpUrl(site);
 
-  const listener = await listenForCallback();
+  let provider: FileOAuthProvider | undefined;
+  const listener = await listenForCallback(() => provider?.expectedState);
   try {
-    const provider = new FileOAuthProvider(site, {
+    provider = new FileOAuthProvider(site, {
       redirectUrl: listener.redirectUrl,
       onRedirect: async (url) => {
         notify(`Sign in to RepoBrain in your browser. If it doesn't open, visit:\n${url.toString()}`);

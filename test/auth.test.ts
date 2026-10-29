@@ -1,11 +1,12 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { authPath, FileOAuthProvider, login, logout, resolveSite, DEFAULT_SITE, type AuthFlow, type LoginDeps } from "../src/auth.js";
+import { authPath, FileOAuthProvider, login, logout, openInBrowser, resolveSite, DEFAULT_SITE, type AuthFlow, type LoginDeps } from "../src/auth.js";
 import { main } from "../src/cli.js";
 import type { Remote } from "../src/remote.js";
 import { buildSync } from "esbuild";
@@ -103,6 +104,40 @@ describe("resolveSite", () => {
     expect(() => resolveSite("ftp://x.example")).toThrow();
     expect(() => resolveSite("not a url")).toThrow();
     expect(resolveSite("http://127.0.0.1:3000")).toBe("http://127.0.0.1:3000");
+    expect(resolveSite("http://[::1]:3000")).toBe("http://[::1]:3000");
+  });
+
+  it("isn't fooled by look-alike loopback hosts", () => {
+    expect(() => resolveSite("http://localhost.evil.com")).toThrow(/https/);
+    expect(() => resolveSite("http://127.0.0.1@evil.com")).toThrow(/https/);
+    expect(() => resolveSite("http://127.0.0.1.evil.com:3000")).toThrow(/https/);
+  });
+});
+
+describe("openInBrowser", () => {
+  const fakeSpawn = (opened: string[]) =>
+    ((command: string, args: string[]) => {
+      opened.push(`${command} ${args.join(" ")}`);
+      const child = new EventEmitter() as EventEmitter & { unref: () => void };
+      child.unref = () => {};
+      setImmediate(() => child.emit("spawn"));
+      return child;
+    }) as unknown as NonNullable<Parameters<typeof openInBrowser>[1]>;
+
+  it("opens https URLs, and http ones only on this machine", async () => {
+    const opened: string[] = [];
+    expect(await openInBrowser(new URL("https://as.example/authorize?x=1"), fakeSpawn(opened))).toBe(true);
+    expect(await openInBrowser(new URL("http://127.0.0.1:54321/authorize"), fakeSpawn(opened))).toBe(true);
+    expect(opened).toHaveLength(2);
+    expect(opened[0]).toMatch(/^(xdg-open|open) https:\/\/as\.example\/authorize\?x=1$/);
+  });
+
+  it("never hands other URLs to the system opener", async () => {
+    const opened: string[] = [];
+    for (const u of ["http://as.example/authorize", "file:///etc/passwd", "javascript:alert(1)", "http://localhost.evil.com/"]) {
+      expect(await openInBrowser(new URL(u), fakeSpawn(opened))).toBe(false);
+    }
+    expect(opened).toEqual([]);
   });
 });
 
@@ -164,11 +199,44 @@ describe("login", () => {
     expect(notices.join("\n")).not.toContain(ACCESS);
   });
 
-  it("rejects a callback whose state doesn't match", async () => {
+  it("ignores a callback whose state doesn't match, and keeps waiting for the real one", async () => {
+    const seen = { codes: [] as string[] };
+    const statuses: number[] = [];
+    const out = await login(SITE_A, {
+      authFlow: fakeFlow(seen),
+      openBrowser: async (url) => {
+        const back = new URL(url.searchParams.get("redirect_uri")!);
+        for (const [code, state] of [["forged-code", "forged"], ["forged-error", null], ["real-code", url.searchParams.get("state")!]]) {
+          const u = new URL(back);
+          if (state === null) u.searchParams.set("error", "access_denied");
+          else u.searchParams.set("code", code!);
+          if (state) u.searchParams.set("state", state);
+          statuses.push((await fetch(u)).status);
+        }
+      },
+      connect: fakeConnect([]),
+      notify: () => {},
+    });
+    expect(out.signedIn).toBe(true);
+    expect(statuses).toEqual([404, 404, 200]);
+    expect(seen.codes).toEqual(["real-code"]);
+  });
+
+  it("fails with the authorization server's error when the callback carries one", async () => {
     const seen = { codes: [] as string[] };
     await expect(
-      login(SITE_A, { authFlow: fakeFlow(seen), openBrowser: browserReturning("c", "forged"), connect: fakeConnect([]), notify: () => {} }),
-    ).rejects.toThrow(/state/);
+      login(SITE_A, {
+        authFlow: fakeFlow(seen),
+        openBrowser: async (url) => {
+          const back = new URL(url.searchParams.get("redirect_uri")!);
+          back.searchParams.set("error", "access_denied");
+          back.searchParams.set("state", url.searchParams.get("state")!);
+          expect((await fetch(back)).status).toBe(400);
+        },
+        connect: fakeConnect([]),
+        notify: () => {},
+      }),
+    ).rejects.toThrow(/access_denied/);
     expect(seen.codes).toEqual([]);
   });
 
@@ -224,6 +292,11 @@ describe("cli login and logout", () => {
 
   it("reports a bad --site as a usage error", async () => {
     expect((await main(["logout", "--site", "http://repobrain.example"])).code).toBe(2);
+  });
+
+  it("reports extra arguments as a usage error", async () => {
+    expect((await main(["login", "http://localhost:3000"])).code).toBe(2);
+    expect((await main(["logout", "extra", "--site", SITE_A])).code).toBe(2);
   });
 });
 
