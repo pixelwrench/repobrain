@@ -2,8 +2,8 @@ import {
   Client, OAuthClientFlowError, OAuthError, ProtocolError, SdkHttpError, StreamableHTTPClientTransport, UnauthorizedError,
   type OAuthClientProvider, type Transport,
 } from "@modelcontextprotocol/client";
-import pkg from "../package.json" with { type: "json" };
 import { FileOAuthProvider } from "./auth.js";
+import { VERSION } from "./version.js";
 
 /** The site's tools, called over MCP with the user's stored OAuth tokens. */
 export interface Remote {
@@ -22,8 +22,8 @@ export class RemoteError extends Error {
   }
 }
 
-/** How the plugin introduces itself to the site. esbuild inlines the version from package.json. */
-export const CLIENT_INFO = { name: "repobrain", version: pkg.version };
+/** How the plugin introduces itself to the site. */
+export const CLIENT_INFO = { name: "repobrain", version: VERSION };
 
 /** The site's MCP endpoint, e.g. https://repobrain.com/api/mcp. */
 export function mcpUrl(site: string): URL {

@@ -8,6 +8,7 @@ import * as z from "zod/v4";
 import { authPath, FileOAuthProvider } from "../src/auth.js";
 import { CLIENT_INFO, connectRemote, RemoteError, toRemoteError, type Remote } from "../src/remote.js";
 import { startFakeSite, type FakeSite } from "./fake-site.js";
+import { VERSION } from "../src/version.js";
 import { useTempHome } from "./helpers.js";
 
 function testServer(): McpServer {
@@ -173,10 +174,11 @@ describe("connectRemote with stored tokens", () => {
 });
 
 describe("CLIENT_INFO", () => {
-  it("carries the package version, which matches the plugin's", () => {
+  it("carries the version, which matches package.json's and the plugin's", () => {
     const pkg = JSON.parse(fs.readFileSync("package.json", "utf8")) as { version: string };
     const plugin = JSON.parse(fs.readFileSync(".claude-plugin/plugin.json", "utf8")) as { version: string };
-    expect(CLIENT_INFO).toEqual({ name: "repobrain", version: pkg.version });
+    expect(CLIENT_INFO).toEqual({ name: "repobrain", version: VERSION });
+    expect(VERSION).toBe(pkg.version);
     expect(plugin.version).toBe(pkg.version);
   });
 });

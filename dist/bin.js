@@ -24944,49 +24944,8 @@ var StreamableHTTPClientTransport = class {
   }
 };
 
-// package.json
-var package_default = {
-  name: "repobrain",
-  version: "0.3.0",
-  description: "Remember the code your AI agents write: spaced-repetition cards from merged changes, drafted by your own Claude.",
-  license: "MIT",
-  type: "module",
-  bin: {
-    repobrain: "dist/bin.js"
-  },
-  files: [
-    "dist",
-    ".claude-plugin",
-    "hooks",
-    "commands",
-    "bin"
-  ],
-  os: [
-    "darwin",
-    "linux"
-  ],
-  engines: {
-    node: ">=24"
-  },
-  scripts: {
-    build: "tsc --noEmit -p tsconfig.build.json && rm -rf dist && esbuild src/bin.ts src/hook-bin.ts --bundle --platform=node --format=esm --target=node24 --outdir=dist --log-level=warning",
-    typecheck: "tsc --noEmit",
-    test: "vitest run",
-    "check:dist": "npm run build && git diff --exit-code --stat -- dist"
-  },
-  dependencies: {
-    "@modelcontextprotocol/client": "2.4.0",
-    "ts-fsrs": "6.0.0"
-  },
-  devDependencies: {
-    "@modelcontextprotocol/server": "2.4.0",
-    "@types/node": "^24.19.2",
-    esbuild: "0.28.2",
-    typescript: "^7.0.2",
-    vitest: "^5.0.5",
-    zod: "4.6.7"
-  }
-};
+// src/version.ts
+var VERSION = "0.3.0";
 
 // src/remote.ts
 var RemoteError = class extends Error {
@@ -24997,7 +24956,7 @@ var RemoteError = class extends Error {
   }
   kind;
 };
-var CLIENT_INFO = { name: "repobrain", version: package_default.version };
+var CLIENT_INFO = { name: "repobrain", version: VERSION };
 function mcpUrl(site) {
   return new URL("api/mcp", site.endsWith("/") ? site : `${site}/`);
 }
