@@ -3,7 +3,10 @@ import path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { runCapture, type CaptureOptions } from "../src/capture.js";
 import { ClaudeEnvError, ClaudeLimitError, ClaudeResultError, type RunClaude } from "../src/generate.js";
-import { acquireLock, cardPath, connectRepo, listCards, readCard, readState, repoDir, writeCard, writeState, type RepoState } from "../src/store.js";
+import { FileOAuthProvider } from "../src/auth.js";
+import { RemoteError } from "../src/remote.js";
+import { acquireLock, cardPath, connectRepo, listCards, readCard, readState, repoDir, setRemote, writeCard, writeState, type RepoState } from "../src/store.js";
+import { fakeRemote, submits, type FakeRemote } from "./fake-remote.js";
 import { commit, makeRepo, sh, useTempHome } from "./helpers.js";
 
 // Pass-through mocks with hooks, so tests can count calls and act at precise moments.
@@ -698,5 +701,93 @@ describe("runCapture", () => {
     expect(moved).toMatchObject({ status: "fresh", commit: head, startLine: card.anchor.startLine + 3, endLine: card.anchor.endLine + 3 });
     expect(moved.fingerprint).toBe(card.anchor.fingerprint);
     expect((await runCapture(key, opts(empty))).anchorsUpdated).toBe(0);
+  });
+
+  describe("with a linked site", () => {
+    const SITE = "http://localhost:3000";
+    // Token-looking values are built by concatenation so secret scanners don't flag the repo.
+    const ACCESS = "at-" + "capture-access";
+    const REFRESH = "rt-" + "capture-refresh";
+    let remote: FakeRemote;
+    let connects: number;
+    const linked = (over: CaptureOptions = {}) => ({ connect: async () => (connects++, remote), ...over });
+    beforeEach(() => {
+      connects = 0;
+      remote = fakeRemote();
+      setRemote(key, { site: SITE, repoId: "repo-1", deckId: "deck-1", linkedAt: "2026-11-01T09:00:00.000Z" });
+      new FileOAuthProvider(SITE).saveTokens({ access_token: ACCESS, token_type: "bearer", refresh_token: REFRESH });
+    });
+
+    it("uploads the cards a capture drafts", async () => {
+      await runCapture(key, opts(fake(), linked()));
+      commit(repo, { "src/ref.ts": FILE }, "feat: referral codes");
+      const report = await runCapture(key, opts(fakeTwo(), linked()));
+      expect(report).toMatchObject({ status: "done", cardsWritten: 2, uploaded: 2 });
+      expect(submits(remote).flatMap((b) => b.cards.map((c) => c.id)).sort()).toEqual(listCards(key).map((c) => c.id).sort());
+      expect((await runCapture(key, opts(empty, linked()))).uploaded).toBe(0);
+    });
+
+    it("never fails the capture when the site can't be reached, logs the kind only, and retries next time", async () => {
+      await runCapture(key, opts(fake(), linked()));
+      commit(repo, { "src/ref.ts": FILE }, "feat: referral codes");
+      remote = fakeRemote({ fail: () => new RemoteError(`could not reach the site: ${ACCESS} What lives in src/ref.ts?`, "network") });
+      const report = await runCapture(key, opts(fakeTwo(), linked()));
+      expect(report).toMatchObject({ status: "done", cardsWritten: 2, uploaded: 0 });
+      expect(log()).toContain("site sync failed (network)");
+      for (const leak of [ACCESS, REFRESH, "What lives in"]) expect(log().split("\n").filter((l) => l.includes("site sync")).join("\n")).not.toContain(leak);
+      remote = fakeRemote();
+      expect((await runCapture(key, opts(empty, linked()))).uploaded).toBe(2);
+      expect(readState(key).remoteAuth).toBeUndefined();
+    });
+
+    it("marks the sign-in expired on an auth failure, and clears it on the next upload", async () => {
+      await runCapture(key, opts(fake(), linked()));
+      commit(repo, { "src/ref.ts": FILE }, "feat: referral codes");
+      remote = fakeRemote({ fail: () => new RemoteError("the site refused the sign-in: run repobrain login", "auth") });
+      expect((await runCapture(key, opts(fake(), linked()))).status).toBe("done");
+      expect(readState(key).remoteAuth).toBe("expired");
+      expect(log()).toContain("site sync failed (auth)");
+      remote = fakeRemote();
+      expect((await runCapture(key, opts(empty, linked()))).uploaded).toBe(1);
+      expect(readState(key).remoteAuth).toBeUndefined();
+    });
+
+    it("logs a tool failure by the tool's name, not its text", async () => {
+      await runCapture(key, opts(fake(), linked()));
+      commit(repo, { "src/ref.ts": FILE }, "feat: referral codes");
+      remote = fakeRemote({ fail: (tool) => (tool === "submit_cards" ? new RemoteError("invalid card: What lives in src/ref.ts?", "tool") : null) });
+      expect((await runCapture(key, opts(fake(), linked()))).status).toBe("done");
+      expect(log()).toContain("site sync failed (tool): submit_cards failed");
+      expect(log()).not.toContain("invalid card");
+    });
+
+    it("pushes every kept card's anchor after the recheck", async () => {
+      const [card] = await keptCards();
+      commit(repo, { "src/ref.ts": FILE.replace("return null", "throw new Error('unknown')") }, "fix: throw");
+      remote = fakeRemote();
+      await runCapture(key, opts(empty, linked()));
+      const pushed = remote.calls.filter((c) => c.tool === "update_anchors");
+      expect(pushed).toHaveLength(1);
+      const now = readCard(key, card.id).anchor;
+      expect(pushed[0].args).toEqual({ repo: key, anchors: [{ id: card.id, status: "changed", startLine: now.startLine, endLine: now.endLine }] });
+      expect(remote.calls.findIndex((c) => c.tool === "submit_cards")).toBeLessThan(remote.calls.findIndex((c) => c.tool === "update_anchors"));
+    });
+
+    it("doesn't connect without a sign-in, and says the sign-in is needed", async () => {
+      await runCapture(key, opts(fake(), linked()));
+      new FileOAuthProvider(SITE).invalidateCredentials("all");
+      commit(repo, { "src/ref.ts": FILE }, "feat");
+      expect((await runCapture(key, opts(fake(), linked()))).uploaded).toBe(0);
+      expect(connects).toBe(1);
+      expect(readState(key).remoteAuth).toBe("expired");
+    });
+
+    it("calls nothing when the repo isn't linked", async () => {
+      setRemote(key, undefined);
+      await runCapture(key, opts(fake(), linked()));
+      commit(repo, { "src/ref.ts": FILE }, "feat");
+      expect((await runCapture(key, opts(fake(), linked()))).uploaded).toBe(0);
+      expect(connects).toBe(0);
+    });
   });
 });

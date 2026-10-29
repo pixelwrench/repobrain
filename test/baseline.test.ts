@@ -5,7 +5,10 @@ import {
   BaselineError, baselineStatus, capFiles, buildBaselinePrompt, buildPlanPrompt, draftBaselineArea, MAX_AREA_CARDS, planBaseline, readPlan, setAreaSkipped,
 } from "../src/baseline.js";
 import { ClaudeEnvError, ClaudeLimitError, ClaudeResultError, MAX_CARDS, type RunClaude } from "../src/generate.js";
-import { acquireLock, cardPath, connectRepo, listCards, readCard, repoDir, writeCard } from "../src/store.js";
+import { FileOAuthProvider } from "../src/auth.js";
+import { RemoteError } from "../src/remote.js";
+import { acquireLock, cardPath, connectRepo, listCards, readCard, readState, repoDir, setRemote, writeCard } from "../src/store.js";
+import { fakeRemote, submits } from "./fake-remote.js";
 import { commit, makeRepo, useTempHome } from "./helpers.js";
 
 const FILE = ["export function applyReferral(code: string) {", "  const ref = lookup(code);", "  if (!ref) return null;", "  return discount(ref);", "}", ""].join("\n");
@@ -367,6 +370,24 @@ describe("baseline", () => {
     expect(readPlan(key)!.areas[0]).toMatchObject({ status: "failed", cards: 0, error: expect.stringMatching(/no usable cards/) });
     const again = await draftBaselineArea(key, { areaId: "a01-request-handling", run: async () => reply([card("src/server.ts")]), now });
     expect(again).toMatchObject({ area: { status: "drafted" }, cardsWritten: 1 });
+  });
+
+  it("uploads a drafted area's cards to a linked site, and never fails the area when that fails", async () => {
+    setRemote(key, { site: "http://localhost:3000", repoId: "repo-1", deckId: "deck-1", linkedAt: "2026-11-01T09:00:00.000Z" });
+    new FileOAuthProvider("http://localhost:3000").saveTokens({ access_token: "at-" + "baseline", token_type: "bearer" });
+    await planned();
+    const down = fakeRemote({ fail: () => new RemoteError("could not reach the site", "network") });
+    const first = await draftBaselineArea(key, { next: true, run: async () => reply([card("src/server.ts")]), now, connect: async () => down });
+    expect(first).toMatchObject({ area: { status: "drafted" }, cardsWritten: 1, uploaded: 0 });
+    expect(log()).toContain("site sync failed (network)");
+    const up = fakeRemote();
+    const second = await draftBaselineArea(key, { next: true, run: async () => reply([card("src/ref.ts")]), now, connect: async () => up });
+    expect(second).toMatchObject({ area: { status: "drafted" }, cardsWritten: 1, uploaded: 2 });
+    expect(submits(up).map((b) => [b.source, b.mergeTitle, b.cards.length])).toEqual([
+      ["baseline", "Baseline: Request handling", 1],
+      ["baseline", "Baseline: Referrals", 1],
+    ]);
+    expect(Object.keys(readState(key).submitted ?? {})).toHaveLength(2);
   });
 
   it("reports status with totals and the total known cost", async () => {

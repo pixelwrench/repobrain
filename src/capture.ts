@@ -5,6 +5,8 @@ import type { Anchor, Card } from "./format.js";
 import { ClaudeEnvError, ClaudeLimitError, ClaudeResultError, costLabel, draftCards, ModelOutputError, runClaude, totalCost, type RunClaude } from "./generate.js";
 import { commitDiff, defaultBranch, fetchQuietly, fileAt, firstParentCommits, git, isAncestor, mergeBase, resolveCommit, toplevel } from "./git.js";
 import { diffPaths, filterDiff } from "./guard.js";
+import { syncToSite } from "./sync.js";
+import type { Remote } from "./remote.js";
 import { acquireLock, appendLog, listCards, loadConfig, mayWriteDraft, readCard, readState, writeCard, writeState, type RepoConfig, type RepoState } from "./store.js";
 
 const DEFAULT_MAX_MERGES = 5;
@@ -25,6 +27,8 @@ export interface CaptureOptions {
   fetch?: boolean;
   run?: RunClaude;
   now?: () => Date;
+  /** Connects to a linked repo's site; tests pass a fake. */
+  connect?: (site: string) => Promise<Remote>;
 }
 
 export interface CaptureReport {
@@ -35,6 +39,8 @@ export interface CaptureReport {
   anchorsUpdated: number;
   /** What this run's claude calls cost, summed from the costs claude reported; null when none was reported. */
   costUsd: number | null;
+  /** Cards uploaded to the linked site this run; 0 when the repo isn't linked or the upload failed. */
+  uploaded: number;
   error?: string;
 }
 
@@ -85,7 +91,7 @@ function recordError(key: string, msg: string, at: Date): void {
 async function capture(key: string, opts: CaptureOptions): Promise<CaptureReport> {
   const repo = loadConfig().repos[key];
   if (!repo) throw new Error(`unknown repo ${key}; run repobrain connect first`);
-  const report: CaptureReport = { status: "done", processed: 0, cardsWritten: 0, skipped: 0, anchorsUpdated: 0, costUsd: null };
+  const report: CaptureReport = { status: "done", processed: 0, cardsWritten: 0, skipped: 0, anchorsUpdated: 0, costUsd: null, uploaded: 0 };
   const lock = acquireLock(key);
   if (!lock) return { ...report, status: "locked" };
   const now = opts.now ?? (() => new Date());
@@ -114,6 +120,9 @@ async function capture(key: string, opts: CaptureOptions): Promise<CaptureReport
       delete state.lastError;
       writeState(key, state);
     }
+    // Last, after every write of this run's state: the upload saves its own progress in state.json.
+    lock.refresh();
+    result.uploaded = await syncToSite(key, { connect: opts.connect, anchors: true });
     return result;
   } catch (e) {
     recordError(key, message(e), now());

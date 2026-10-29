@@ -401,7 +401,7 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
           return usage("--max must be a positive integer");
         }
         capturing = true;
-        const report: CaptureOutput = await runCapture(key, { since: values.since, maxMerges, fetch: !values["no-fetch"], run: deps.run, now });
+        const report: CaptureOutput = await runCapture(key, { since: values.since, maxMerges, fetch: !values["no-fetch"], run: deps.run, now, connect: deps.connect });
         return { code: report.status === "failed" ? 1 : 0, out: report };
       } catch (e) {
         if (!capturing) logCaptureError(key, dir, message(e));
@@ -605,7 +605,7 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
         case "draft": {
           if ((id === undefined) === !values.next) return usage(`draft takes an area id or --next; ${BASELINE_USAGE}`);
           const { key } = connected(values.repo);
-          const out: BaselineDraftOutput = await draftBaselineArea(key, { areaId: id, next: values.next, run: deps.run, now });
+          const out: BaselineDraftOutput = await draftBaselineArea(key, { areaId: id, next: values.next, run: deps.run, now, connect: deps.connect });
           return { code: out.error ? 1 : 0, out };
         }
         case "status":

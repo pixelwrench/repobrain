@@ -25704,7 +25704,7 @@ function logout(site) {
 
 // src/baseline.ts
 import { randomBytes as randomBytes2 } from "node:crypto";
-import path6 from "node:path";
+import path7 from "node:path";
 
 // src/excludes.ts
 import fs4 from "node:fs";
@@ -26293,6 +26293,162 @@ function draftCards(input, run2 = runClaude) {
   );
 }
 
+// src/sync.ts
+import path6 from "node:path";
+var BATCH_SIZE = 20;
+var MAX_TITLE = 300;
+var MAX_NAME = 100;
+function toSubmitted(card) {
+  const a = card.anchor;
+  return {
+    id: card.id,
+    area: card.area,
+    status: card.status,
+    body: card.body,
+    anchor: { commit: a.commit, path: a.path, symbol: a.symbol, startLine: a.startLine, endLine: a.endLine, fingerprint: a.fingerprint, status: a.status }
+  };
+}
+var SHA = /^[0-9a-f]{7,64}$/;
+var CARD_ID = /^[A-Za-z0-9._-]{1,120}$/;
+var within = (s, min, max) => s.length >= min && s.length <= max;
+function unsendable(card) {
+  const a = card.anchor;
+  const b = card.body;
+  if (!CARD_ID.test(card.id)) return "card id is too long for the site";
+  if (!SHA.test(card.merge)) return "merge is not a commit id";
+  if (card.area.length > 200) return "area is over 200 characters";
+  if (!SHA.test(a.commit)) return "anchor commit is not a commit id";
+  if (!within(a.path, 1, 500)) return "anchor path is empty or over 500 characters";
+  if (a.symbol !== null && a.symbol.length > 200) return "anchor symbol is over 200 characters";
+  if (!Number.isInteger(a.startLine) || !Number.isInteger(a.endLine) || a.startLine < 1 || a.endLine < 1) return "anchor lines must be positive";
+  if (!within(a.fingerprint, 8, 128)) return "anchor fingerprint has the wrong length";
+  if (b.kind === "mcq") {
+    if (!within(b.question, 1, 1200)) return "question is empty or over 1200 characters";
+    if (b.choices.length < 2 || b.choices.length > 6 || b.choices.some((c) => !within(c, 1, 400))) return "choices must be 2-6, each 1-400 characters";
+    if (!within(b.explanation, 1, 1200)) return "explanation is empty or over 1200 characters";
+  } else if (!within(b.front, 1, 1200) || !within(b.back, 1, 1200)) {
+    return "front and back must each be 1-1200 characters";
+  }
+  return null;
+}
+var isStrings = (v) => Array.isArray(v) && v.every((x) => typeof x === "string");
+function checkSubmitResult(v) {
+  const r = v;
+  const ok2 = r !== null && typeof r === "object" && isStrings(r.accepted) && isStrings(r.unchanged) && Array.isArray(r.rejected) && r.rejected.every((x) => typeof x?.id === "string" && typeof x?.reason === "string");
+  if (!ok2) throw new RemoteError("submit_cards returned an unexpected result", "tool");
+  return r;
+}
+async function submitPending(key, remote, report = { uploaded: 0, rejected: [] }) {
+  const state = readState(key);
+  const submitted = state.submitted ??= {};
+  const groups = /* @__PURE__ */ new Map();
+  for (const card of listCards(key)) {
+    if (submitted[card.id]) continue;
+    const why = unsendable(card);
+    if (why) {
+      report.rejected.push({ id: card.id, reason: why });
+      continue;
+    }
+    const group = JSON.stringify([card.merge, card.mergeTitle, card.source]);
+    groups.set(group, [...groups.get(group) ?? [], card]);
+  }
+  for (const cards of groups.values()) {
+    const { merge: merge2, mergeTitle, source } = cards[0];
+    for (let i = 0; i < cards.length; i += BATCH_SIZE) {
+      const batch = cards.slice(i, i + BATCH_SIZE);
+      const input = {
+        repo: key,
+        merge: merge2,
+        mergeTitle: mergeTitle.trim().slice(0, MAX_TITLE) || merge2,
+        source,
+        cards: batch.map(toSubmitted)
+      };
+      const result = checkSubmitResult(await remote.call("submit_cards", { ...input }));
+      const sent = new Set(batch.map((c) => c.id));
+      for (const id of [...result.accepted, ...result.unchanged]) {
+        if (!sent.has(id) || submitted[id]) continue;
+        submitted[id] = true;
+        report.uploaded++;
+      }
+      report.rejected.push(...result.rejected.filter((r) => sent.has(r.id)));
+      writeState(key, state);
+    }
+  }
+  return report;
+}
+var BUSY = "busy, try again: a capture or baseline is running";
+async function linkRepo(key, repoPath, site, remote, now = () => /* @__PURE__ */ new Date()) {
+  const lock = acquireLock(key);
+  if (!lock) throw new Error(BUSY);
+  try {
+    const name = path6.basename(repoPath).trim().slice(0, MAX_NAME) || key;
+    const linked = await remote.call("link_repo", { key, name });
+    if (typeof linked?.repoId !== "string" || typeof linked?.deckId !== "string") throw new RemoteError("link_repo returned an unexpected result", "tool");
+    const link = { site, repoId: linked.repoId, deckId: linked.deckId, linkedAt: now().toISOString() };
+    setRemote(key, link);
+    const state = readState(key);
+    delete state.submitted;
+    delete state.remoteAuth;
+    writeState(key, state);
+    const { uploaded, rejected } = await submitPending(key, remote);
+    return { repoId: link.repoId, deckId: link.deckId, uploaded, rejected };
+  } finally {
+    lock.release();
+  }
+}
+function unlinkRepo(key) {
+  return { unlinked: setRemote(key, void 0)?.site ?? null };
+}
+var ANCHOR_BATCH = 2e3;
+function failureLine(kind, step) {
+  if (kind === "auth") return `site sync failed (auth): the site refused the sign-in or it expired; run repobrain login`;
+  if (kind === "network") return `site sync failed (network): could not reach the site during ${step}`;
+  return `site sync failed (tool): ${step} failed`;
+}
+function setRemoteAuth(key, expired) {
+  const state = readState(key);
+  if (expired === (state.remoteAuth === "expired")) return;
+  if (expired) state.remoteAuth = "expired";
+  else delete state.remoteAuth;
+  writeState(key, state);
+}
+async function syncToSite(key, opts = {}) {
+  const report = { uploaded: 0, rejected: [] };
+  let step = "connect";
+  try {
+    const link = loadConfig().repos[key]?.remote;
+    if (!link) return 0;
+    if (!isSignedIn(link.site)) throw new RemoteError("not signed in", "auth");
+    const remote = await (opts.connect ?? connectRemote)(link.site);
+    try {
+      step = "submit_cards";
+      await submitPending(key, remote, report);
+      if (opts.anchors) {
+        step = "update_anchors";
+        const anchors = listCards(key).filter((c) => c.status === "kept").map((c) => ({ id: c.id, status: c.anchor.status, startLine: c.anchor.startLine, endLine: c.anchor.endLine }));
+        for (let i = 0; i < anchors.length; i += ANCHOR_BATCH) {
+          await remote.call("update_anchors", { repo: key, anchors: anchors.slice(i, i + ANCHOR_BATCH) });
+        }
+      }
+    } finally {
+      await remote.close().catch(() => {
+      });
+    }
+    setRemoteAuth(key, false);
+    if (report.uploaded || report.rejected.length) {
+      appendLog(key, `site: ${report.uploaded} cards uploaded${report.rejected.length ? `, ${report.rejected.length} refused: ${report.rejected.map((r) => r.id).join(" ")}` : ""}`);
+    }
+  } catch (e) {
+    const kind = e instanceof RemoteError ? e.kind : "tool";
+    try {
+      appendLog(key, failureLine(kind, step) + (report.uploaded ? ` (${report.uploaded} cards uploaded first)` : ""));
+      if (kind === "auth") setRemoteAuth(key, true);
+    } catch {
+    }
+  }
+  return report.uploaded;
+}
+
 // src/baseline.ts
 var AREA_STATUSES = ["planned", "drafted", "skipped", "failed"];
 var BaselineError = class extends Error {
@@ -26305,7 +26461,7 @@ var MAX_WHY_CHARS = 200;
 var MAX_PLAN_FILES = 3e3;
 var MAX_README_BYTES = 8e3;
 var MAX_AREA_BYTES = 6e4;
-var planPath = (key) => path6.join(repoDir(key), "baseline.json");
+var planPath = (key) => path7.join(repoDir(key), "baseline.json");
 var message2 = (e) => e instanceof Error ? e.message : String(e);
 var LOCKED = "a capture or baseline is running; try again when it finishes";
 function buildPlanPrompt() {
@@ -26490,7 +26646,7 @@ async function draftBaselineArea(key, opts) {
     const plan = readPlan(key);
     if (!plan) throw new BaselineError("no baseline plan; run repobrain baseline plan first");
     const area = pickArea(plan, opts);
-    const report = { area: null, cardsWritten: 0, rejected: [], dropped: [], skippedFiles: [], costUsd: null };
+    const report = { area: null, cardsWritten: 0, rejected: [], dropped: [], skippedFiles: [], costUsd: null, uploaded: 0 };
     if (!area) {
       const failed = plan.areas.filter((a) => a.status === "failed").length;
       return { ...report, note: `no planned areas left${failed ? `; ${failed} failed, draft one by id to retry it` : ""}` };
@@ -26553,7 +26709,7 @@ Why: ${area.why}
 
 ${body}`,
           repoPath: repo.path,
-          repoName: path6.basename(repo.path),
+          repoName: path7.basename(repo.path),
           commit: plan.commit,
           title: `Baseline: ${area.name}`,
           files: sent,
@@ -26598,7 +26754,9 @@ ${body}`,
       const why = report.rejected.length ? report.rejected.join(" | ") : drafted.cards.length ? "every card's file exists and isn't a draft" : "the reply had no cards";
       return finish("failed", drafted.costUsd, `no usable cards: ${why}`);
     }
-    return finish("drafted", drafted.costUsd);
+    const out = finish("drafted", drafted.costUsd);
+    out.uploaded = await syncToSite(key, { connect: opts.connect });
+    return out;
   } finally {
     lock.release();
   }
@@ -26644,7 +26802,7 @@ async function setAreaSkipped(key, id, skip, opts = {}) {
 }
 
 // src/capture.ts
-import path7 from "node:path";
+import path8 from "node:path";
 var DEFAULT_MAX_MERGES = 5;
 var DEFAULT_MAX_DIFF_BYTES = 6e4;
 var MAX_FAILURES = 3;
@@ -26684,7 +26842,7 @@ function recordError(key, msg, at) {
 async function capture(key, opts) {
   const repo = loadConfig().repos[key];
   if (!repo) throw new Error(`unknown repo ${key}; run repobrain connect first`);
-  const report = { status: "done", processed: 0, cardsWritten: 0, skipped: 0, anchorsUpdated: 0, costUsd: null };
+  const report = { status: "done", processed: 0, cardsWritten: 0, skipped: 0, anchorsUpdated: 0, costUsd: null, uploaded: 0 };
   const lock = acquireLock(key);
   if (!lock) return { ...report, status: "locked" };
   const now = opts.now ?? (() => /* @__PURE__ */ new Date());
@@ -26712,6 +26870,8 @@ async function capture(key, opts) {
       delete state.lastError;
       writeState(key, state);
     }
+    lock.refresh();
+    result.uploaded = await syncToSite(key, { connect: opts.connect, anchors: true });
     return result;
   } catch (e) {
     recordError(key, message3(e), now());
@@ -26820,7 +26980,7 @@ async function captureMerges(key, repo, state, branch, head, report, opts, now, 
       drafted = await draftCards(
         {
           repoPath: repo.path,
-          repoName: path7.basename(repo.path),
+          repoName: path8.basename(repo.path),
           merge: commit.sha,
           title: commit.title,
           diff,
@@ -26904,7 +27064,7 @@ function updateAnchors(key, repoPath, head, refresh) {
 }
 
 // src/schedule.ts
-import path8 from "node:path";
+import path9 from "node:path";
 
 // node_modules/ts-fsrs/dist/index.mjs
 init_error();
@@ -28409,7 +28569,7 @@ function nextState(current, grade, now) {
   const rating = grade === "right" ? Rating.Good : Rating.Again;
   return scheduler.next(current ?? createEmptyCard(now), now, rating).card;
 }
-var schedulePath = (key) => path8.join(repoDir(key), "schedule.json");
+var schedulePath = (key) => path9.join(repoDir(key), "schedule.json");
 function loadSchedule(key) {
   const raw = readJson(schedulePath(key), {});
   return Object.fromEntries(Object.entries(raw).map(([id, s]) => [id, revive(s)]));
@@ -28437,114 +28597,6 @@ function dueCards(cards, sched, now) {
     if (!sa || !sb) return (sa ? 0 : 1) - (sb ? 0 : 1);
     return sa.due.getTime() - sb.due.getTime();
   });
-}
-
-// src/sync.ts
-import path9 from "node:path";
-var BATCH_SIZE = 20;
-var MAX_TITLE = 300;
-var MAX_NAME = 100;
-function toSubmitted(card) {
-  const a = card.anchor;
-  return {
-    id: card.id,
-    area: card.area,
-    status: card.status,
-    body: card.body,
-    anchor: { commit: a.commit, path: a.path, symbol: a.symbol, startLine: a.startLine, endLine: a.endLine, fingerprint: a.fingerprint, status: a.status }
-  };
-}
-var SHA = /^[0-9a-f]{7,64}$/;
-var CARD_ID = /^[A-Za-z0-9._-]{1,120}$/;
-var within = (s, min, max) => s.length >= min && s.length <= max;
-function unsendable(card) {
-  const a = card.anchor;
-  const b = card.body;
-  if (!CARD_ID.test(card.id)) return "card id is too long for the site";
-  if (!SHA.test(card.merge)) return "merge is not a commit id";
-  if (card.area.length > 200) return "area is over 200 characters";
-  if (!SHA.test(a.commit)) return "anchor commit is not a commit id";
-  if (!within(a.path, 1, 500)) return "anchor path is empty or over 500 characters";
-  if (a.symbol !== null && a.symbol.length > 200) return "anchor symbol is over 200 characters";
-  if (!Number.isInteger(a.startLine) || !Number.isInteger(a.endLine) || a.startLine < 1 || a.endLine < 1) return "anchor lines must be positive";
-  if (!within(a.fingerprint, 8, 128)) return "anchor fingerprint has the wrong length";
-  if (b.kind === "mcq") {
-    if (!within(b.question, 1, 1200)) return "question is empty or over 1200 characters";
-    if (b.choices.length < 2 || b.choices.length > 6 || b.choices.some((c) => !within(c, 1, 400))) return "choices must be 2-6, each 1-400 characters";
-    if (!within(b.explanation, 1, 1200)) return "explanation is empty or over 1200 characters";
-  } else if (!within(b.front, 1, 1200) || !within(b.back, 1, 1200)) {
-    return "front and back must each be 1-1200 characters";
-  }
-  return null;
-}
-var isStrings = (v) => Array.isArray(v) && v.every((x) => typeof x === "string");
-function checkSubmitResult(v) {
-  const r = v;
-  const ok2 = r !== null && typeof r === "object" && isStrings(r.accepted) && isStrings(r.unchanged) && Array.isArray(r.rejected) && r.rejected.every((x) => typeof x?.id === "string" && typeof x?.reason === "string");
-  if (!ok2) throw new RemoteError("submit_cards returned an unexpected result", "tool");
-  return r;
-}
-async function submitPending(key, remote) {
-  const state = readState(key);
-  const submitted = state.submitted ??= {};
-  const report = { uploaded: 0, rejected: [] };
-  const groups = /* @__PURE__ */ new Map();
-  for (const card of listCards(key)) {
-    if (submitted[card.id]) continue;
-    const why = unsendable(card);
-    if (why) {
-      report.rejected.push({ id: card.id, reason: why });
-      continue;
-    }
-    const group = JSON.stringify([card.merge, card.mergeTitle, card.source]);
-    groups.set(group, [...groups.get(group) ?? [], card]);
-  }
-  for (const cards of groups.values()) {
-    const { merge: merge2, mergeTitle, source } = cards[0];
-    for (let i = 0; i < cards.length; i += BATCH_SIZE) {
-      const batch = cards.slice(i, i + BATCH_SIZE);
-      const input = {
-        repo: key,
-        merge: merge2,
-        mergeTitle: mergeTitle.trim().slice(0, MAX_TITLE) || merge2,
-        source,
-        cards: batch.map(toSubmitted)
-      };
-      const result = checkSubmitResult(await remote.call("submit_cards", { ...input }));
-      const sent = new Set(batch.map((c) => c.id));
-      for (const id of [...result.accepted, ...result.unchanged]) {
-        if (!sent.has(id) || submitted[id]) continue;
-        submitted[id] = true;
-        report.uploaded++;
-      }
-      report.rejected.push(...result.rejected.filter((r) => sent.has(r.id)));
-      writeState(key, state);
-    }
-  }
-  return report;
-}
-var BUSY = "busy, try again: a capture or baseline is running";
-async function linkRepo(key, repoPath, site, remote, now = () => /* @__PURE__ */ new Date()) {
-  const lock = acquireLock(key);
-  if (!lock) throw new Error(BUSY);
-  try {
-    const name = path9.basename(repoPath).trim().slice(0, MAX_NAME) || key;
-    const linked = await remote.call("link_repo", { key, name });
-    if (typeof linked?.repoId !== "string" || typeof linked?.deckId !== "string") throw new RemoteError("link_repo returned an unexpected result", "tool");
-    const link = { site, repoId: linked.repoId, deckId: linked.deckId, linkedAt: now().toISOString() };
-    setRemote(key, link);
-    const state = readState(key);
-    delete state.submitted;
-    delete state.remoteAuth;
-    writeState(key, state);
-    const { uploaded, rejected } = await submitPending(key, remote);
-    return { repoId: link.repoId, deckId: link.deckId, uploaded, rejected };
-  } finally {
-    lock.release();
-  }
-}
-function unlinkRepo(key) {
-  return { unlinked: setRemote(key, void 0)?.site ?? null };
 }
 
 // src/cli.ts
@@ -28732,7 +28784,7 @@ ${USAGE}`);
           return usage("--max must be a positive integer");
         }
         capturing = true;
-        const report = await runCapture(key, { since: values.since, maxMerges, fetch: !values["no-fetch"], run: deps.run, now });
+        const report = await runCapture(key, { since: values.since, maxMerges, fetch: !values["no-fetch"], run: deps.run, now, connect: deps.connect });
         return { code: report.status === "failed" ? 1 : 0, out: report };
       } catch (e) {
         if (!capturing) logCaptureError(key, dir, message4(e));
@@ -28959,7 +29011,7 @@ ${USAGE}`);
         case "draft": {
           if (id === void 0 === !values.next) return usage(`draft takes an area id or --next; ${BASELINE_USAGE}`);
           const { key } = connected(values.repo);
-          const out = await draftBaselineArea(key, { areaId: id, next: values.next, run: deps.run, now });
+          const out = await draftBaselineArea(key, { areaId: id, next: values.next, run: deps.run, now, connect: deps.connect });
           return { code: out.error ? 1 : 0, out };
         }
         case "status":

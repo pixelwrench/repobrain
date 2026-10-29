@@ -1,7 +1,8 @@
 import path from "node:path";
 import type { AnchorStatus, Card, CardBody, CardSource, CardStatus } from "./format.js";
-import { RemoteError, type Remote } from "./remote.js";
-import { acquireLock, listCards, readState, setRemote, writeState, type RemoteLink } from "./store.js";
+import { isSignedIn } from "./auth.js";
+import { connectRemote, RemoteError, type Remote } from "./remote.js";
+import { acquireLock, appendLog, listCards, loadConfig, readState, setRemote, writeState, type RemoteLink } from "./store.js";
 
 // ---- The site's contract: the shapes link_repo and submit_cards take and return. ----
 
@@ -114,12 +115,12 @@ export interface SubmitReport {
  * Uploads the cards the site doesn't have yet, grouped by merge (and title, since baseline areas share a
  * commit) in batches of {@link BATCH_SIZE}. `state.submitted` is saved after each batch, so a failure part way
  * keeps what got through and the rest is retried next time. Rejected cards are not marked, so they're sent again.
- * The caller holds the repo's capture lock.
+ * The caller holds the repo's capture lock. `report` is filled in as batches land, so a caller sees the
+ * progress made before a failure.
  */
-export async function submitPending(key: string, remote: Remote): Promise<SubmitReport> {
+export async function submitPending(key: string, remote: Remote, report: SubmitReport = { uploaded: 0, rejected: [] }): Promise<SubmitReport> {
   const state = readState(key);
   const submitted = (state.submitted ??= {});
-  const report: SubmitReport = { uploaded: 0, rejected: [] };
   const groups = new Map<string, Card[]>();
   for (const card of listCards(key)) {
     if (submitted[card.id]) continue;
@@ -195,4 +196,75 @@ export async function linkRepo(key: string, repoPath: string, site: string, remo
 /** Forgets the repo's link. The site keeps its copy of the cards. */
 export function unlinkRepo(key: string): UnlinkOutput {
   return { unlinked: setRemote(key, undefined)?.site ?? null };
+}
+
+// ---- Uploads during capture. ----
+
+/** The site takes at most this many anchors per `update_anchors` call. */
+export const ANCHOR_BATCH = 2000;
+
+export interface SiteSyncOptions {
+  connect?: (site: string) => Promise<Remote>;
+  /** Also push every kept card's anchor status and lines (`update_anchors`), after capture's anchor recheck. */
+  anchors?: boolean;
+}
+
+/** What capture.log says about a failure: its kind and a fixed message, never the error's text, tokens or card text. */
+function failureLine(kind: string, step: string): string {
+  if (kind === "auth") return `site sync failed (auth): the site refused the sign-in or it expired; run repobrain login`;
+  if (kind === "network") return `site sync failed (network): could not reach the site during ${step}`;
+  return `site sync failed (tool): ${step} failed`;
+}
+
+function setRemoteAuth(key: string, expired: boolean): void {
+  const state = readState(key);
+  if (expired === (state.remoteAuth === "expired")) return;
+  if (expired) state.remoteAuth = "expired";
+  else delete state.remoteAuth;
+  writeState(key, state);
+}
+
+/**
+ * When the repo is linked, uploads the cards the site doesn't have and, with `anchors`, pushes the kept
+ * cards' anchors. Best effort: a failure is logged to capture.log by kind only and never thrown, and an auth
+ * failure sets `state.remoteAuth` until an upload succeeds. Returns how many cards the site took.
+ * The caller holds the repo's capture lock.
+ */
+export async function syncToSite(key: string, opts: SiteSyncOptions = {}): Promise<number> {
+  const report: SubmitReport = { uploaded: 0, rejected: [] };
+  let step = "connect";
+  try {
+    const link = loadConfig().repos[key]?.remote;
+    if (!link) return 0;
+    if (!isSignedIn(link.site)) throw new RemoteError("not signed in", "auth");
+    const remote = await (opts.connect ?? connectRemote)(link.site);
+    try {
+      step = "submit_cards";
+      await submitPending(key, remote, report);
+      if (opts.anchors) {
+        step = "update_anchors";
+        const anchors = listCards(key)
+          .filter((c) => c.status === "kept")
+          .map((c) => ({ id: c.id, status: c.anchor.status, startLine: c.anchor.startLine, endLine: c.anchor.endLine }));
+        for (let i = 0; i < anchors.length; i += ANCHOR_BATCH) {
+          await remote.call("update_anchors", { repo: key, anchors: anchors.slice(i, i + ANCHOR_BATCH) });
+        }
+      }
+    } finally {
+      await remote.close().catch(() => {});
+    }
+    setRemoteAuth(key, false);
+    if (report.uploaded || report.rejected.length) {
+      appendLog(key, `site: ${report.uploaded} cards uploaded${report.rejected.length ? `, ${report.rejected.length} refused: ${report.rejected.map((r) => r.id).join(" ")}` : ""}`);
+    }
+  } catch (e) {
+    const kind = e instanceof RemoteError ? e.kind : "tool";
+    try {
+      appendLog(key, failureLine(kind, step) + (report.uploaded ? ` (${report.uploaded} cards uploaded first)` : ""));
+      if (kind === "auth") setRemoteAuth(key, true);
+    } catch {
+      // An unwritable state or log: the capture itself still stands.
+    }
+  }
+  return report.uploaded;
 }

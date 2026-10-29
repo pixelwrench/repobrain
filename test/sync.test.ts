@@ -4,41 +4,13 @@ import { main } from "../src/cli.js";
 import type { Card } from "../src/format.js";
 import { RemoteError, type Remote } from "../src/remote.js";
 import { acquireLock, connectRepo, loadConfig, readState, writeCard } from "../src/store.js";
-import { BATCH_SIZE, linkRepo, submitPending, toSubmitted, type SubmitCardsInput } from "../src/sync.js";
+import { BATCH_SIZE, linkRepo, submitPending, toSubmitted } from "../src/sync.js";
+import { fakeRemote, submits } from "./fake-remote.js";
 import { commit, makeRepo, useTempHome } from "./helpers.js";
 
 const SITE = "http://localhost:3000";
 const MERGE_A = "a".repeat(40);
 const MERGE_B = "b".repeat(40);
-
-export interface FakeRemote extends Remote {
-  calls: { tool: string; args: Record<string, unknown> }[];
-}
-
-/** A Remote that records its calls; submit_cards accepts every card unless `reject` names it. */
-export function fakeRemote(opts: { reject?: Set<string>; fail?: (tool: string) => RemoteError | null } = {}): FakeRemote {
-  const calls: FakeRemote["calls"] = [];
-  return {
-    calls,
-    async call<T>(tool: string, args: Record<string, unknown>): Promise<T> {
-      calls.push({ tool, args: structuredClone(args) });
-      const failure = opts.fail?.(tool);
-      if (failure) throw failure;
-      if (tool === "link_repo") return { repoId: "repo-1", deckId: "deck-1", created: true } as T;
-      if (tool === "submit_cards") {
-        const ids = (args as unknown as SubmitCardsInput).cards.map((c) => c.id);
-        return {
-          accepted: ids.filter((id) => !opts.reject?.has(id)),
-          unchanged: [],
-          rejected: ids.filter((id) => opts.reject?.has(id)).map((id) => ({ id, reason: "looks like a secret" })),
-        } as T;
-      }
-      if (tool === "update_anchors") return { updated: (args.anchors as unknown[]).length } as T;
-      throw new RemoteError(`unknown tool ${tool}`, "tool");
-    },
-    close: async () => {},
-  };
-}
 
 function makeCard(key: string, id: string, over: Partial<Card> = {}): Card {
   return {
@@ -49,7 +21,6 @@ function makeCard(key: string, id: string, over: Partial<Card> = {}): Card {
   };
 }
 
-const submits = (r: FakeRemote) => r.calls.filter((c) => c.tool === "submit_cards").map((c) => c.args as unknown as SubmitCardsInput);
 
 describe("toSubmitted", () => {
   it("maps a card to the site's submittedCard shape, field for field", () => {

@@ -13,7 +13,9 @@ import {
 } from "./generate.js";
 import { defaultBranch, fetchQuietly, fileAt, resolveCommit, toplevel, treeFiles, type TreeFile } from "./git.js";
 import { findSecrets, isSensitivePath } from "./guard.js";
+import type { Remote } from "./remote.js";
 import { acquireLock, appendLog, isSafeId, loadConfig, mayWriteDraft, readJson, repoDir, writeCard, writeFileAtomic, type Lock } from "./store.js";
+import { syncToSite } from "./sync.js";
 
 export const AREA_STATUSES = ["planned", "drafted", "skipped", "failed"] as const;
 export type AreaStatus = (typeof AREA_STATUSES)[number];
@@ -295,6 +297,8 @@ export interface DraftAreaOptions {
   next?: boolean;
   run?: RunClaude;
   now?: () => Date;
+  /** Connects to a linked repo's site; tests pass a fake. */
+  connect?: (site: string) => Promise<Remote>;
 }
 
 export interface AreaDraftReport {
@@ -309,6 +313,8 @@ export interface AreaDraftReport {
   /** Files not sent because they didn't fit in the area's 60,000 bytes. */
   skippedFiles: string[];
   costUsd: number | null;
+  /** Cards uploaded to the linked site after drafting; 0 when the repo isn't linked or the upload failed. */
+  uploaded: number;
   error?: string;
 }
 
@@ -336,7 +342,7 @@ export async function draftBaselineArea(key: string, opts: DraftAreaOptions): Pr
     const plan = readPlan(key);
     if (!plan) throw new BaselineError("no baseline plan; run repobrain baseline plan first");
     const area = pickArea(plan, opts);
-    const report: AreaDraftReport = { area: null, cardsWritten: 0, rejected: [], dropped: [], skippedFiles: [], costUsd: null };
+    const report: AreaDraftReport = { area: null, cardsWritten: 0, rejected: [], dropped: [], skippedFiles: [], costUsd: null, uploaded: 0 };
     if (!area) {
       const failed = plan.areas.filter((a) => a.status === "failed").length;
       return { ...report, note: `no planned areas left${failed ? `; ${failed} failed, draft one by id to retry it` : ""}` };
@@ -437,7 +443,10 @@ export async function draftBaselineArea(key: string, opts: DraftAreaOptions): Pr
       const why = report.rejected.length ? report.rejected.join(" | ") : drafted.cards.length ? "every card's file exists and isn't a draft" : "the reply had no cards";
       return finish("failed", drafted.costUsd, `no usable cards: ${why}`);
     }
-    return finish("drafted", drafted.costUsd);
+    const out = finish("drafted", drafted.costUsd);
+    // After the plan is saved: a slow or failing site never holds up the area's outcome.
+    out.uploaded = await syncToSite(key, { connect: opts.connect });
+    return out;
   } finally {
     lock.release();
   }
