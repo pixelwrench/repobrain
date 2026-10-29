@@ -28802,7 +28802,7 @@ function locate(repoPath, a, head) {
 }
 var INTERACTIVE_BUDGET_MS = 45e3;
 var WEEK_UPLOAD_MS = 15e3;
-var LOGIN_HINT = "the site refused this machine's sign-in, or it expired: run repobrain login";
+var loginHint = (site) => `the site refused this machine's sign-in, or it expired: run repobrain login --site ${site}`;
 function connectBy(p, deadline) {
   p.then((r) => deadline.aborted ? r.close().catch(() => {
   }) : void 0, () => {
@@ -29075,7 +29075,7 @@ ${USAGE}`);
       } catch (e) {
         out = { ...local, site: link.site, weekUrl: weekUrl(link), remote: false, remoteError: message4(e) };
       }
-      if (authExpired(key)) out.loginHint = LOGIN_HINT;
+      if (authExpired(key)) out.loginHint = loginHint(link.site);
       return ok(out);
     }
     case "curate": {

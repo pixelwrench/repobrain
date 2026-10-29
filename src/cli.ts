@@ -375,7 +375,8 @@ function locate(repoPath: string, a: Anchor, head: string) {
 export const INTERACTIVE_BUDGET_MS = 45_000;
 /** How long week's upload may take, so get_week still has time once the upload gives up. */
 const WEEK_UPLOAD_MS = 15_000;
-const LOGIN_HINT = "the site refused this machine's sign-in, or it expired: run repobrain login";
+/** Names the linked site: without --site, login would sign in to REPOBRAIN_SITE or the default site instead. */
+const loginHint = (site: string): string => `the site refused this machine's sign-in, or it expired: run repobrain login --site ${site}`;
 
 /**
  * A card as the site's get_due_cards and get_deck list it: an mcq's `definition` is its correct choice. A
@@ -703,7 +704,7 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
       } catch (e) {
         out = { ...local, site: link.site, weekUrl: weekUrl(link), remote: false, remoteError: message(e) };
       }
-      if (authExpired(key)) out.loginHint = LOGIN_HINT;
+      if (authExpired(key)) out.loginHint = loginHint(link.site);
       return ok(out);
     }
     case "curate": {

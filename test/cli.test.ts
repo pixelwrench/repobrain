@@ -743,10 +743,11 @@ describe("cli with a repo linked to the site", () => {
       expect(r.out).not.toHaveProperty("loginHint");
     });
 
-    it("says to run repobrain login when the site refuses the sign-in", async () => {
+    it("says to run repobrain login, for the linked site, when the site refuses the sign-in", async () => {
       remote = fakeRemote({ fail: (tool) => (tool === "get_week" ? new RemoteError("not signed in", "auth") : null) });
       const r = await cli("week");
-      expect(r.out).toMatchObject({ remote: false, loginHint: expect.stringMatching(/repobrain login/) });
+      // Without --site, login would sign in to REPOBRAIN_SITE or the default site, not the one this repo syncs with.
+      expect(r.out).toMatchObject({ remote: false, loginHint: expect.stringContaining(`run repobrain login --site ${SITE}`) });
       expect(readState(key).remoteAuth).toBe("expired");
       remote = fakeRemote();
       const again = await cli("week");
