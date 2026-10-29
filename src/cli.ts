@@ -566,7 +566,7 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
         case "skip":
         case "unskip":
           if (id === undefined) return usage(BASELINE_USAGE);
-          return ok(setAreaSkipped(connected(values.repo).key, id, sub === "skip") satisfies BaselineAreaOutput);
+          return ok((await setAreaSkipped(connected(values.repo).key, id, sub === "skip")) satisfies BaselineAreaOutput);
         default:
           return usage(BASELINE_USAGE);
       }

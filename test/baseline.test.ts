@@ -311,12 +311,12 @@ describe("baseline", () => {
       await expect(draft({ next: true }, async () => reply([]))).rejects.toThrow(/run codebrain baseline plan first/);
       await planned();
       await expect(draft({ areaId: "a09-nope" }, async () => reply([]))).rejects.toThrow(/no area a09-nope/);
-      setAreaSkipped(key, "a02-referrals", true);
+      await setAreaSkipped(key, "a02-referrals", true);
       await expect(draft({ areaId: "a02-referrals" }, async () => reply([]))).rejects.toThrow(/skipped.*unskip/);
       await draft({ next: true }, async () => reply([card("src/server.ts")]));
       await expect(draft({ areaId: "a01-request-handling" }, async () => reply([]))).rejects.toThrow(/already drafted/);
       expect(await draft({ next: true }, async () => reply([]))).toMatchObject({ area: null, note: expect.stringMatching(/no planned areas left/) });
-      setAreaSkipped(key, "a02-referrals", false);
+      await setAreaSkipped(key, "a02-referrals", false);
       const lock = acquireLock(key)!;
       try {
         await expect(draft({ next: true }, async () => reply([]))).rejects.toThrow(BaselineError);
@@ -358,7 +358,7 @@ describe("baseline", () => {
     expect(baselineStatus(key)).toEqual({ plan: null, totals: null, costUsd: null });
     await planned();
     await draftBaselineArea(key, { next: true, run: async () => reply([card("src/server.ts")], 0.01), now });
-    setAreaSkipped(key, "a02-referrals", true);
+    await setAreaSkipped(key, "a02-referrals", true);
     const status = baselineStatus(key);
     expect(status.totals).toEqual({ areas: 2, planned: 0, drafted: 1, skipped: 1, failed: 0, cards: 1 });
     expect(status.costUsd).toBe(0.014);
@@ -367,13 +367,25 @@ describe("baseline", () => {
 
   it("skips planned or failed areas and unskips skipped ones, refusing anything else", async () => {
     await planned();
-    expect(setAreaSkipped(key, "a01-request-handling", true)).toMatchObject({ id: "a01-request-handling", status: "skipped" });
-    expect(() => setAreaSkipped(key, "a01-request-handling", true)).toThrow(/is skipped/);
-    expect(setAreaSkipped(key, "a01-request-handling", false)).toMatchObject({ status: "planned" });
-    expect(() => setAreaSkipped(key, "a01-request-handling", false)).toThrow(/isn't skipped/);
-    expect(() => setAreaSkipped(key, "nope", true)).toThrow(/no area nope/);
+    expect(await setAreaSkipped(key, "a01-request-handling", true)).toMatchObject({ id: "a01-request-handling", status: "skipped" });
+    await expect(setAreaSkipped(key, "a01-request-handling", true)).rejects.toThrow(/is skipped/);
+    expect(await setAreaSkipped(key, "a01-request-handling", false)).toMatchObject({ status: "planned" });
+    await expect(setAreaSkipped(key, "a01-request-handling", false)).rejects.toThrow(/isn't skipped/);
+    await expect(setAreaSkipped(key, "nope", true)).rejects.toThrow(/no area nope/);
     await draftBaselineArea(key, { areaId: "a02-referrals", run: async () => reply([card("src/ref.ts")]), now });
-    expect(() => setAreaSkipped(key, "a02-referrals", true)).toThrow(/is drafted/);
+    await expect(setAreaSkipped(key, "a02-referrals", true)).rejects.toThrow(/is drafted/);
+  });
+
+  it("waits briefly for the lock to skip or unskip, then says it's busy", async () => {
+    await planned();
+    const lock = acquireLock(key)!;
+    const started = Date.now();
+    await expect(setAreaSkipped(key, "a01-request-handling", true, { tries: 3, delayMs: 20 })).rejects.toThrow(/busy, try again/);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(40);
+    expect(readPlan(key)!.areas[0].status).toBe("planned");
+    setTimeout(() => lock.release(), 50);
+    expect(await setAreaSkipped(key, "a01-request-handling", true, { tries: 20, delayMs: 20 })).toMatchObject({ status: "skipped" });
+    expect(acquireLock(key)).not.toBeNull();
   });
 
   it("reports a corrupt baseline.json clearly", () => {

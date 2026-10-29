@@ -5,7 +5,7 @@ import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { main, type CurateUnreadable, type DueOutput, type ShowOutput, type StatsOutput, type WeekOutput } from "../src/cli.js";
 import { LETTERS, type Card } from "../src/format.js";
 import { ClaudeEnvError, type RunClaude } from "../src/generate.js";
-import { cardPath, home, listCards, readCard, readJsonl, readState, repoDir, writeCard, writeState } from "../src/store.js";
+import { acquireLock, cardPath, findRepo, home, listCards, readCard, readJsonl, readState, repoDir, writeCard, writeState } from "../src/store.js";
 import { commit, makeRepo, sh, tempDir, useTempHome } from "./helpers.js";
 
 const FILE = ["export function applyReferral(code: string) {", "  const ref = lookup(code);", "  if (!ref) return null;", "  return discount(ref);", "}", ""].join("\n");
@@ -17,6 +17,7 @@ const run: RunClaude = async () => ({
   costUsd: null,
 });
 const now = () => new Date("2026-11-02T09:00:00Z");
+const connectedKey = (dir: string): string => findRepo(dir)!.key;
 
 describe("cli", () => {
   let repo: string;
@@ -197,6 +198,12 @@ describe("cli", () => {
         expect((await base(argv)).code).toBe(2);
       }
       expect((await base(["skip", "a09"])).code).toBe(1);
+      const lock = acquireLock(connectedKey(repo))!;
+      try {
+        expect(await base(["skip", "a01-referrals"])).toEqual({ code: 1, out: { error: "busy, try again: a capture or baseline is running" } });
+      } finally {
+        lock.release();
+      }
     });
   });
 

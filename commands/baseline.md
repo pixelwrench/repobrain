@@ -12,7 +12,7 @@ Explain in two sentences: the baseline drafts cards about the codebase as it is 
 
 Run `codebrain baseline plan`. If it exits 1, show `error` and stop; if the error says a capture or baseline is running, say to try again in a minute. Otherwise show `plan.areas` as a numbered list: `name`, then `why`, then how many files (`files.length`). Say what the plan cost (`costUsd`, or "not reported" when null). If `sent.truncated` is true, say only the first `sent.files` of `sent.totalFiles` files were listed. If `rejected` isn't empty, say how many areas in the reply were left out.
 
-Ask which areas to skip, if any. Run `codebrain baseline skip <id>` for each one the user names. Then go on to drafting.
+Ask which areas to skip, if any. Run `codebrain baseline skip <id>` for each one the user names; if it says busy, a capture or draft is running, so wait a minute and try again. Then go on to drafting.
 
 ## A plan exists
 

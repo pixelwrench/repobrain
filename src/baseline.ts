@@ -317,7 +317,7 @@ export async function draftBaselineArea(key: string, opts: DraftAreaOptions): Pr
       return { ...report, note: `no planned areas left${failed ? `; ${failed} failed, draft one by id to retry it` : ""}` };
     }
     const index = plan.areas.indexOf(area);
-    /** Saves this area's outcome and fills in the report. Only this area changes, so a skip made meanwhile stays. */
+    /** Saves this area's outcome and fills in the report, re-reading the plan first so only this area changes. */
     const finish = (status: AreaStatus, costUsd: number | null, error?: string): AreaDraftReport => {
       const latest = readPlan(key) ?? plan;
       const saved = latest.commit === plan.commit ? latest.areas.find((a) => a.id === area.id) : undefined;
@@ -439,18 +439,37 @@ export function baselineStatus(key: string): BaselineStatus {
   };
 }
 
+export interface SkipOptions {
+  /** How many times to try for the lock (default 5). */
+  tries?: number;
+  /** How long to wait between tries, in milliseconds (default 400, so about 2 seconds in all). */
+  delayMs?: number;
+}
+
 /**
- * Skips a planned or failed area, or (skip false) puts a skipped one back to planned. No lock, so it
- * works while a capture runs; a draft saves only its own area, so it doesn't undo a skip.
+ * Skips a planned or failed area, or (skip false) puts a skipped one back to planned. It takes the
+ * per-repo lock for the read and write, so it can't race a draft saving its area, waiting briefly
+ * for a capture or draft to finish before giving up.
  */
-export function setAreaSkipped(key: string, id: string, skip: boolean): BaselineArea {
-  const plan = readPlan(key);
-  if (!plan) throw new BaselineError("no baseline plan; run codebrain baseline plan first");
-  const area = plan.areas.find((a) => a.id === id);
-  if (!area) throw new BaselineError(`no area ${id} in the baseline plan`);
-  if (skip && area.status !== "planned" && area.status !== "failed") throw new BaselineError(`area ${id} is ${area.status}; only planned or failed areas can be skipped`);
-  if (!skip && area.status !== "skipped") throw new BaselineError(`area ${id} isn't skipped`);
-  area.status = skip ? "skipped" : "planned";
-  writePlan(key, plan);
-  return area;
+export async function setAreaSkipped(key: string, id: string, skip: boolean, opts: SkipOptions = {}): Promise<BaselineArea> {
+  const tries = opts.tries ?? 5;
+  let lock: Lock | null = null;
+  for (let i = 0; i < tries && !lock; i++) {
+    if (i > 0) await new Promise((r) => setTimeout(r, opts.delayMs ?? 400));
+    lock = acquireLock(key);
+  }
+  if (!lock) throw new BaselineError(`busy, try again: ${LOCKED.split(";")[0]}`);
+  try {
+    const plan = readPlan(key);
+    if (!plan) throw new BaselineError("no baseline plan; run codebrain baseline plan first");
+    const area = plan.areas.find((a) => a.id === id);
+    if (!area) throw new BaselineError(`no area ${id} in the baseline plan`);
+    if (skip && area.status !== "planned" && area.status !== "failed") throw new BaselineError(`area ${id} is ${area.status}; only planned or failed areas can be skipped`);
+    if (!skip && area.status !== "skipped") throw new BaselineError(`area ${id} isn't skipped`);
+    area.status = skip ? "skipped" : "planned";
+    writePlan(key, plan);
+    return area;
+  } finally {
+    lock.release();
+  }
 }
