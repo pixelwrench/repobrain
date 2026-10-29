@@ -188,6 +188,23 @@ function sendableFiles(key: string, repoPath: string, commit: string, only?: str
   );
 }
 
+/**
+ * At most `max` files. Over the cap, the shallowest paths are kept first (ties in git's order), so the
+ * top-level structure always survives a large tree; the files kept stay in git's order.
+ */
+export function capFiles(files: TreeFile[], max: number): TreeFile[] {
+  if (files.length <= max) return files;
+  const depth = (p: string) => p.split("/").length;
+  const keep = new Set(
+    files
+      .map((f, i) => ({ f, i }))
+      .sort((a, b) => depth(a.f.path) - depth(b.f.path) || a.i - b.i)
+      .slice(0, max)
+      .map((x) => x.f),
+  );
+  return files.filter((f) => keep.has(f));
+}
+
 /** The README at the repo root to send: README.md, else README, else the first other readme.*. */
 function readmeOf(files: TreeFile[]): string | null {
   const root = files.map((f) => f.path).filter((p) => /^readme(\.[^/]*)?$/i.test(p));
@@ -234,7 +251,7 @@ export async function planBaseline(key: string, opts: PlanOptions = {}): Promise
     if (!commit) throw new BaselineError("no default branch with commits found; nothing to plan");
 
     const all = sendableFiles(key, repo.path, commit);
-    const listed = all.slice(0, MAX_PLAN_FILES);
+    const listed = capFiles(all, MAX_PLAN_FILES);
     const readmePath = readmeOf(all);
     const readmeText = readmePath === null ? null : fileAt(repo.path, commit, readmePath);
     // Scan the whole file: a secret cut in half at the limit would slip past a scan of the excerpt.

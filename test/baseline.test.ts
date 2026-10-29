@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
-  BaselineError, baselineStatus, buildBaselinePrompt, buildPlanPrompt, draftBaselineArea, MAX_AREA_CARDS, planBaseline, readPlan, setAreaSkipped,
+  BaselineError, baselineStatus, capFiles, buildBaselinePrompt, buildPlanPrompt, draftBaselineArea, MAX_AREA_CARDS, planBaseline, readPlan, setAreaSkipped,
 } from "../src/baseline.js";
 import { ClaudeEnvError, ClaudeLimitError, ClaudeResultError, MAX_CARDS, type RunClaude } from "../src/generate.js";
 import { acquireLock, cardPath, connectRepo, listCards, readCard, repoDir, writeCard } from "../src/store.js";
@@ -21,6 +21,21 @@ const twoAreas = [
 ];
 const card = (p: string, over: Record<string, unknown> = {}) => ({
   kind: "flashcard", front: `What lives in ${p}?`, back: "The referral lookup.", path: p, startLine: 1, endLine: 4, symbol: null, ...over,
+});
+
+describe("capFiles", () => {
+  const f = (p: string) => ({ path: p, lines: 1 });
+
+  it("keeps everything under the cap, in git's order", () => {
+    const files = ["b/x.ts", "a.ts"].map(f);
+    expect(capFiles(files, 2)).toEqual(files);
+  });
+
+  it("over the cap, keeps the shallowest paths first, ties in git's order, and lists them in git's order", () => {
+    const files = ["a/b/c/deep1.ts", "a/b/c/deep2.ts", "a/b/mid.ts", "a/top.ts", "README.md", "z/b/mid.ts", "z/top.ts"].map(f);
+    expect(capFiles(files, 4).map((x) => x.path)).toEqual(["a/b/mid.ts", "a/top.ts", "README.md", "z/top.ts"]);
+    expect(capFiles(files, 1).map((x) => x.path)).toEqual(["README.md"]);
+  });
 });
 
 describe("baseline", () => {
