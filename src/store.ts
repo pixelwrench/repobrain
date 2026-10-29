@@ -39,8 +39,11 @@ export interface RepoState {
    * card changed since is sent again. `true` (from older versions) means sent, version unknown.
    */
   submitted?: Record<string, string | true>;
-  /** Cards the site refused, or that were held back, with the hash of that version: not sent again until changed. */
-  refused?: Record<string, string>;
+  /**
+   * Cards the site refused, or that were held back, with the hash of that version (not sent again until
+   * changed) and why. Marks written before reasons were kept are the hash alone.
+   */
+  refused?: Record<string, string | { hash: string; reason: string }>;
   /** A hash of the anchors last pushed with update_anchors, so an unchanged set isn't pushed again. */
   anchorsPushed?: string;
   /** Set when the site refused the stored sign-in; the next successful upload clears it. */

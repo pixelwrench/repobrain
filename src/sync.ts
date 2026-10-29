@@ -3,7 +3,7 @@ import path from "node:path";
 import type { AnchorStatus, Card, CardBody, CardSource, CardStatus } from "./format.js";
 import { isSignedIn } from "./auth.js";
 import { connectRemote, RemoteError, type Remote } from "./remote.js";
-import { acquireLock, appendLog, listCards, loadConfig, readState, setRemote, writeState, type RemoteLink } from "./store.js";
+import { acquireLock, appendLog, listCards, loadConfig, readState, setRemote, writeState, type RemoteLink, type RepoState } from "./store.js";
 
 // ---- The site's contract: the shapes link_repo and submit_cards take and return. ----
 
@@ -155,6 +155,13 @@ const outOfTime = (): RemoteError => new RemoteError("the site sync ran out of t
  * saved after each batch, so a failure part way keeps what got through and the rest is retried next time.
  * The caller holds the repo's capture lock.
  */
+/** A card's refusal mark: the hash of the version refused, and why (null for a mark from before reasons were kept). */
+export function refusalOf(state: RepoState, id: string): { hash: string; reason: string | null } | null {
+  const mark = state.refused?.[id];
+  if (mark === undefined) return null;
+  return typeof mark === "string" ? { hash: mark, reason: null } : { hash: mark.hash, reason: mark.reason };
+}
+
 export async function submitPending(key: string, remote: Remote, opts: SubmitOptions = {}): Promise<SubmitReport> {
   const report = opts.report ?? { uploaded: 0, rejected: [] };
   const state = readState(key);
@@ -164,10 +171,10 @@ export async function submitPending(key: string, remote: Remote, opts: SubmitOpt
   let heldBack = false;
   for (const card of listCards(key)) {
     const hash = cardHash(card);
-    if (submitted[card.id] === hash || refused[card.id] === hash) continue;
+    if (submitted[card.id] === hash || refusalOf(state, card.id)?.hash === hash) continue;
     const why = unsendable(card);
     if (why) {
-      refused[card.id] = hash;
+      refused[card.id] = { hash, reason: why };
       report.rejected.push({ id: card.id, reason: why });
       heldBack = true;
       continue;
@@ -196,7 +203,7 @@ export async function submitPending(key: string, remote: Remote, opts: SubmitOpt
       for (const r of result.rejected) {
         const hash = sent.get(r.id);
         if (hash === undefined) continue;
-        refused[r.id] = hash;
+        refused[r.id] = { hash, reason: r.reason };
         report.rejected.push(r);
       }
       writeState(key, state);

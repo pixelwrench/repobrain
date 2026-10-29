@@ -10,6 +10,7 @@ import { commit, makeRepo, sh, tempDir, useTempHome } from "./helpers.js";
 import { FileOAuthProvider, logout } from "../src/auth.js";
 import { RemoteError } from "../src/remote.js";
 import { callsTo, emptySiteWeek, fakeRemote, submits, type FakeRemote } from "./fake-remote.js";
+import { cardHash } from "../src/sync.js";
 
 const FILE = ["export function applyReferral(code: string) {", "  const ref = lookup(code);", "  if (!ref) return null;", "  return discount(ref);", "}", ""].join("\n");
 const run: RunClaude = async () => ({
@@ -663,8 +664,12 @@ describe("cli with a repo linked to the site", () => {
   let key: string;
   let remote: FakeRemote;
   let connects: number;
-  const cli = (...argv: string[]) => main([...argv, "--repo", repo], { now, run, connect: async () => (connects++, remote) });
+  let budgetMs: number | undefined;
+  const cli = (...argv: string[]) => main([...argv, "--repo", repo], { now, run, connect: async () => (connects++, remote), siteBudgetMs: budgetMs });
   const byKind = (kind: string): Card => listCards(key).find((c) => c.body.kind === kind)!;
+  /** Whether a call ran under the command's one deadline. */
+  const bounded = (c: FakeRemote["calls"][number]) =>
+    c.opts?.signal instanceof AbortSignal && typeof c.opts.timeout === "number" && c.opts.timeout <= 45_000 && c.opts.timeout > 0;
   /** The site's copies of the local cards, as get_due_cards and get_deck list them. */
   /** The site's copies of the local cards, as get_due_cards and get_deck list them, with the site's anchor. */
   const siteCards = () => {
@@ -683,6 +688,7 @@ describe("cli with a repo linked to the site", () => {
     repo = makeRepo();
     commit(repo, { "src/ref.ts": FILE }, "feat: referral codes");
     connects = 0;
+    budgetMs = undefined;
     remote = fakeRemote();
     key = ((await cli("connect")).out as { connected: string }).connected;
     await cli("capture", "--since", "1 year ago", "--no-fetch");
@@ -700,7 +706,32 @@ describe("cli with a repo linked to the site", () => {
       const r = await cli("week");
       expect(r).toEqual({ code: 0, out: { ...siteWeek, lastCaptureError: { at: "2026-11-01T09:00:00.000Z", message: "git broke" }, site: SITE, weekUrl: `${SITE}/repos/repo-1/week`, remote: true } });
       expect(remote.calls.map((c) => c.tool)).toEqual(["submit_cards", "get_week"]);
-      expect(remote.calls[1]).toMatchObject({ args: { repo: key }, opts: { timeout: 30_000 } });
+      expect(remote.calls[1].args).toEqual({ repo: key });
+      expect(remote.calls.every(bounded)).toBe(true);
+    });
+
+    it("still prints the site's week when the upload fails, with uploadError", async () => {
+      writeCard(key, { ...byKind("flashcard"), id: "late-1" });
+      remote = fakeRemote({ fail: (tool) => (tool === "submit_cards" ? new RemoteError("could not reach the site", "network") : null) });
+      const r = await cli("week");
+      expect(r.out).toMatchObject({ remote: true, uploadError: "could not reach the site" });
+      expect(remote.calls.map((c) => c.tool)).toEqual(["submit_cards", "get_week"]);
+    });
+
+    it("falls back to the local week within the command's deadline when the site hangs", async () => {
+      writeCard(key, { ...byKind("flashcard"), id: "late-1" });
+      remote = fakeRemote({ delayMs: 20_000 });
+      budgetMs = 300;
+      const started = Date.now();
+      const r = await cli("week");
+      expect(Date.now() - started).toBeLessThan(3_000);
+      expect(r).toMatchObject({ code: 0, out: { drafts: 3, remote: false, remoteError: expect.stringMatching(/didn't answer/) } });
+    });
+
+    it("falls back when connecting hangs", async () => {
+      budgetMs = 300;
+      const r = await main(["week", "--repo", repo], { now, run, connect: () => new Promise(() => {}), siteBudgetMs: budgetMs });
+      expect(r.out).toMatchObject({ drafts: 2, remote: false, remoteError: expect.stringMatching(/didn't answer/) });
     });
 
     it("prints the local week with remoteError when the site fails", async () => {
@@ -739,7 +770,7 @@ describe("cli with a repo linked to the site", () => {
       expect(await cli("curate", mcq.id, "keep")).toEqual({ code: 0, out: { id: mcq.id, status: "kept", reanchored: false } });
       expect(await cli("curate", flash.id, "drop")).toEqual({ code: 0, out: { id: flash.id, status: "dropped", reanchored: false } });
       expect(callsTo(remote, "curate_card")).toEqual([{ repo: key, id: mcq.id, decision: "keep" }, { repo: key, id: flash.id, decision: "drop" }]);
-      expect(remote.calls.every((c) => c.opts?.timeout === 30_000)).toBe(true);
+      expect(remote.calls.every(bounded)).toBe(true);
       expect(readCard(key, mcq.id).status).toBe("kept");
       expect(readCard(key, flash.id).status).toBe("dropped");
       expect(readJsonl(key, "curation.jsonl")).toHaveLength(2);
@@ -763,6 +794,53 @@ describe("cli with a repo linked to the site", () => {
       expect(readJsonl(key, "curation.jsonl")).toEqual([]);
     });
 
+    it("refuses to keep a card the site refused, giving the reason, and drops it locally only", async () => {
+      const bad = { ...byKind("flashcard"), id: "bad-1" };
+      writeCard(key, bad);
+      remote = fakeRemote({ reject: new Set(["bad-1"]) });
+      const message = "card bad-1 isn't on the site: it was refused when uploaded (looks like a secret); edit it and run curate fix, or drop it";
+      expect(await cli("curate", "bad-1", "keep")).toEqual({ code: 1, out: { error: message } });
+      expect(readState(key).refused?.["bad-1"]).toMatchObject({ reason: "looks like a secret" });
+      // Already refused at this version: not sent again, and the reason is kept.
+      expect(await cli("curate", "bad-1", "fix")).toEqual({ code: 1, out: { error: message } });
+      expect(callsTo(remote, "curate_card")).toEqual([]);
+      expect(await cli("curate", "bad-1", "drop")).toEqual({ code: 0, out: { id: "bad-1", status: "dropped", reanchored: false, site: "not on the site" } });
+      expect(readCard(key, "bad-1").status).toBe("dropped");
+      expect(callsTo(remote, "curate_card")).toEqual([]);
+    });
+
+    it("curates a refused card once its fix is accepted", async () => {
+      const bad = { ...byKind("flashcard"), id: "bad-1" };
+      writeCard(key, bad);
+      remote = fakeRemote({ reject: new Set(["bad-1"]) });
+      expect((await cli("curate", "bad-1", "keep")).code).toBe(1);
+      writeCard(key, { ...bad, body: { kind: "flashcard", front: "Fixed front", back: "Fixed back" } });
+      remote = fakeRemote();
+      expect((await cli("curate", "bad-1", "fix")).out).toEqual({ id: "bad-1", status: "kept", reanchored: false });
+      expect(remote.calls.map((c) => c.tool)).toEqual(["submit_cards", "curate_card"]);
+    });
+
+    it("names a refusal recorded before reasons were kept", async () => {
+      const bad = { ...byKind("flashcard"), id: "bad-1" };
+      writeCard(key, bad);
+      writeState(key, { ...readState(key), refused: { "bad-1": cardHash(bad) } });
+      expect((await cli("curate", "bad-1", "keep")).out).toEqual({
+        error: "card bad-1 isn't on the site: it was refused when uploaded (no reason recorded); edit it and run curate fix, or drop it",
+      });
+      expect(submits(remote)).toEqual([]);
+    });
+
+    it("asks to try again when a capture holds the lock and the card isn't uploaded yet", async () => {
+      writeCard(key, { ...byKind("flashcard"), id: "late-1" });
+      const lock = acquireLock(key)!;
+      try {
+        expect(await cli("curate", "late-1", "keep")).toEqual({ code: 1, out: { error: "a capture is uploading cards; try again in a moment" } });
+      } finally {
+        lock.release();
+      }
+      expect(readCard(key, "late-1").status).toBe("draft");
+    });
+
     it("uploads a card the site doesn't have yet before curating it", async () => {
       const late = { ...byKind("flashcard"), id: "late-1" };
       writeCard(key, late);
@@ -784,12 +862,15 @@ describe("cli with a repo linked to the site", () => {
       const [mcqSite, flashSite] = siteCards();
       // The site's anchor wins: it says the code changed, and the text there differs from the local file.
       const flashChanged = { ...flashSite, term: "Edited on the site", repoCard: { ...flashSite.repoCard, startLine: 3, status: "changed" } };
-      const gone = { id: "33333333-3333-4333-8333-333333333333", term: "No local file", definition: "x", repoCard: { id: "gone-1", path: "lib/x.ts", startLine: 7, endLine: 9, status: "orphaned" } };
+      const gone = { id: "33333333-3333-4333-8333-333333333333", term: "No local file", definition: "x", repoCard: { id: "gone-1", path: "lib/x.ts", startLine: 7, endLine: 9, status: "changed" } };
       const plain = { id: "55555555-5555-4555-8555-555555555555", term: "Not a repo card", definition: "y" };
-      remote = fakeRemote({ answers: { get_due_cards: () => ({ deckId: "deck-1", cards: [mcqSite, flashChanged, gone, plain] }) } });
+      // Orphaned cards aren't quizzed, and don't count against --limit.
+      const orphan = { ...plain, id: "66666666-6666-4666-8666-666666666666", repoCard: { ...gone.repoCard, id: "orphan-1", status: "orphaned" } };
+      const extra = { ...plain, id: "77777777-7777-4777-8777-777777777777" };
+      remote = fakeRemote({ answers: { get_due_cards: () => ({ deckId: "deck-1", cards: [orphan, mcqSite, flashChanged, gone, plain, extra] }) } });
       const mcq = byKind("mcq");
       if (mcq.body.kind !== "mcq") throw new Error("not mcq");
-      const r = await cli("due", "--limit", "5");
+      const r = await cli("due", "--limit", "4");
       expect(r).toEqual({
         code: 0,
         out: {
@@ -803,7 +884,16 @@ describe("cli with a repo linked to the site", () => {
         },
       });
       expect(callsTo(remote, "get_due_cards")).toEqual([{ deckId: "deck-1" }]);
-      expect(remote.calls[0].opts).toEqual({ timeout: 30_000 });
+      expect(remote.calls.every(bounded)).toBe(true);
+    });
+
+    it("marks the sign-in expired when the site refuses it in any linked command", async () => {
+      remote = fakeRemote({ fail: () => new RemoteError("not signed in", "auth") });
+      expect((await cli("due")).code).toBe(1);
+      expect(readState(key).remoteAuth).toBe("expired");
+      remote = fakeRemote();
+      expect((await cli("due")).code).toBe(0);
+      expect(readState(key).remoteAuth).toBeUndefined();
     });
 
     it("gives the answer for a site id, from the due cards or else the deck", async () => {
@@ -848,7 +938,7 @@ describe("cli with a repo linked to the site", () => {
         { deckId: "deck-1", outcomes: [{ cardId: FLASH_ID, correct: false }] },
         { deckId: "deck-1", outcomes: [{ cardId: MCQ_ID, correct: false }] },
       ]);
-      expect(remote.calls.every((c) => c.opts?.timeout === 30_000)).toBe(true);
+      expect(remote.calls.every(bounded)).toBe(true);
       expect(readJsonl(key, "reviews.jsonl")).toEqual([]);
     });
 
@@ -865,7 +955,19 @@ describe("cli with a repo linked to the site", () => {
       expect(callsTo(remote, "record_quiz_results")).toEqual([{ deckId: "deck-1", outcomes: [{ cardId: FLASH_ID, correct: true }] }]);
       // A plugin id the site has no card for.
       writeCard(key, { ...flash, id: "late-1" });
-      expect(await cli("grade", "late-1", "right")).toEqual({ code: 1, out: { error: "no card late-1 on the site" } });
+      expect(await cli("grade", "late-1", "right")).toEqual({
+        code: 1, out: { error: "card late-1 isn't studied on the site: it may be a draft, dropped, or not uploaded yet" },
+      });
+    });
+
+    it("refuses to grade a card whose code the site says was removed", async () => {
+      const [mcqSite] = siteCards();
+      remote = fakeRemote({ answers: { get_due_cards: () => ({ deckId: "deck-1", cards: [{ ...mcqSite, repoCard: { ...mcqSite.repoCard, status: "orphaned" } }] }) } });
+      const mcq = byKind("mcq");
+      expect(await cli("grade", mcq.id, "right")).toEqual({
+        code: 1, out: { error: `the code for ${mcq.id} was removed; drop it, or re-point it with \`curate ${mcq.id} fix --path P --lines S-E\`` },
+      });
+      expect(callsTo(remote, "record_quiz_results")).toEqual([]);
     });
 
     it("says so when the site doesn't record the grade", async () => {

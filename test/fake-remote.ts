@@ -39,6 +39,7 @@ export function fakeRemote(opts: FakeRemoteOptions = {}): FakeRemote {
       if (!schema) throw new RemoteError(`unknown tool ${tool}`, "tool");
       const parsed = schema.safeParse(args);
       if (!parsed.success) throw new Error(`${tool} input breaks the site's contract: ${parsed.error.message}`);
+      if (callOpts?.signal?.aborted) throw new RemoteError("aborted", "network");
       if (opts.delayMs) {
         await new Promise<void>((resolve, reject) => {
           const timer = setTimeout(resolve, opts.delayMs);

@@ -6,7 +6,7 @@ If `repobrain` isn't found, say the plugin's CLI isn't built or installed: run `
 
 Run `repobrain week`. If it fails, show the error and stop; if it says the repository isn't connected, suggest `/repobrain:connect`.
 
-When the output has `site`, the repository is linked to the RepoBrain site: decisions are saved there and also show on the `weekUrl` page; if it has `remoteError` (or `loginHint`), say first that the site couldn't be used and show that message, since the cards shown are then this machine's copies.
+When the output has `site`, the repository is linked to the RepoBrain site: decisions are saved there and also show on the `weekUrl` page; if it has `remoteError` (or `loginHint`), say first that the site couldn't be used and show that message, since the cards shown are then this machine's copies; if it has `uploadError`, say this machine's newest cards couldn't be sent this time and will be sent next time.
 
 Report problems first:
 - `claudeUnavailable`: new merges aren't being drafted; claude has been unavailable since `since`. Show `message` and suggest checking that `claude` is installed and logged in.

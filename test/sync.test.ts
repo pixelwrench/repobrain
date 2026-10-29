@@ -6,7 +6,7 @@ import { main } from "../src/cli.js";
 import type { Card } from "../src/format.js";
 import { RemoteError, type Remote } from "../src/remote.js";
 import { acquireLock, appendLog, connectRepo, loadConfig, readState, repoDir, setRemote, writeCard, writeState } from "../src/store.js";
-import { BATCH_SIZE, cut, linkRepo, submitPending, syncToSite, toSubmitted } from "../src/sync.js";
+import { BATCH_SIZE, cardHash, cut, linkRepo, refusalOf, submitPending, syncToSite, toSubmitted } from "../src/sync.js";
 import { fakeRemote, submits } from "./fake-remote.js";
 import { commit, makeRepo, useTempHome } from "./helpers.js";
 
@@ -79,7 +79,7 @@ describe("link and submitPending", () => {
     expect(out.rejected).toEqual([{ id: "bad-1", reason: "looks like a secret" }]);
     const state = readState(key);
     expect(Object.keys(state.submitted ?? {})).toEqual(["ok-1"]);
-    expect(Object.keys(state.refused ?? {})).toEqual(["bad-1"]);
+    expect(state.refused).toEqual({ "bad-1": { hash: expect.any(String), reason: "looks like a secret" } });
     const again = fakeRemote();
     expect(await submitPending(key, again)).toEqual({ uploaded: 0, rejected: [] });
     expect(again.calls).toEqual([]);
@@ -87,6 +87,16 @@ describe("link and submitPending", () => {
     expect(await submitPending(key, again)).toEqual({ uploaded: 1, rejected: [] });
     expect(submits(again).flatMap((b) => b.cards.map((c) => c.id))).toEqual(["bad-1"]);
     expect(readState(key).refused).toEqual({});
+  });
+
+  it("keeps an old hash-only refusal mark, so that card isn't sent again until it changes", async () => {
+    const card = makeCard(key, "bad-1");
+    writeCard(key, card);
+    writeState(key, { ...readState(key), refused: { "bad-1": cardHash(card) } });
+    const remote = fakeRemote();
+    expect(await submitPending(key, remote)).toEqual({ uploaded: 0, rejected: [] });
+    expect(remote.calls).toEqual([]);
+    expect(refusalOf(readState(key), "bad-1")).toEqual({ hash: cardHash(card), reason: null });
   });
 
   it("sends a card again when it changed after upload, and an old-style mark once", async () => {

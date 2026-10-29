@@ -16,7 +16,7 @@ import {
   acquireLock, appendJsonl, appendLog, cardPath, connectRepo, findRepo, home, isSafeId, listCardsReport, readCard, readJsonl, readState, writeCard,
   type CardListing, type RemoteLink, type RepoState,
 } from "./store.js";
-import { linkRepo, setRemoteAuth, submitPending, SYNC_BUDGET_MS, unlinkRepo, type LinkOutput, type UnlinkOutput } from "./sync.js";
+import { linkRepo, refusalOf, setRemoteAuth, submitPending, unlinkRepo, type LinkOutput, type UnlinkOutput } from "./sync.js";
 
 // ---- Output shapes: every command prints one of these as JSON on stdout. ----
 
@@ -84,13 +84,19 @@ export type RemoteWeekOutput = WeekOutput & {
   lesson?: { title: string; deckId: string } | null;
   /** Why the site couldn't be used; the cards shown are the local copies. */
   remoteError?: string;
+  /** Why uploading this machine's new cards failed; the site's week was still shown, and they're sent next time. */
+  uploadError?: string;
   /** Set while the site refuses this machine's sign-in. */
   loginHint?: string;
 };
 /** A kept card whose code changed is re-anchored at the default branch's head, and then carries its new range. */
-export type CurateOutput =
+export type CurateOutput = (
   | { id: string; status: "kept" | "dropped"; reanchored: false }
-  | { id: string; status: "kept"; reanchored: true; path: string; startLine: number; endLine: number };
+  | { id: string; status: "kept"; reanchored: true; path: string; startLine: number; endLine: number }
+) & {
+  /** In a linked repo, for a card the site refused when uploaded: dropped here only. */
+  site?: "not on the site";
+};
 /** A due card's question only: Claude Code shows command output to the user, so answers come from `answer`. */
 export type DueBody = { kind: "mcq"; question: string; choices: string[] } | { kind: "flashcard"; front: string };
 export interface DueCard {
@@ -226,6 +232,8 @@ export interface CliDeps {
   login?: LoginDeps;
   /** Connects to the site with the stored sign-in; tests pass a fake. */
   connect?: (site: string) => Promise<Remote>;
+  /** Overrides {@link INTERACTIVE_BUDGET_MS}, for tests. */
+  siteBudgetMs?: number;
 }
 
 const USAGE =
@@ -360,9 +368,13 @@ function locate(repoPath: string, a: Anchor, head: string) {
 
 // ---- Remote mode: a repo linked to the site uses the site's week, curation and reviews. ----
 
-/** How long one call to the site may take, connecting included. */
-const SITE_TIMEOUT_MS = 30_000;
-const timed = { timeout: SITE_TIMEOUT_MS };
+/**
+ * One deadline for everything a command does on the site, connecting included, well inside the 120s that
+ * Claude Code gives a Bash command.
+ */
+export const INTERACTIVE_BUDGET_MS = 45_000;
+/** How long week's upload may take, so get_week still has time once the upload gives up. */
+const WEEK_UPLOAD_MS = 15_000;
 const LOGIN_HINT = "the site refused this machine's sign-in, or it expired: run repobrain login";
 
 /**
@@ -379,37 +391,70 @@ interface SiteCard {
   repoCard?: { id: string; path: string; startLine: number; endLine: number; status: AnchorStatus };
 }
 
-/** `p`, or a network error once `ms` pass first; a Remote that connects after that is closed. */
-function connectWithin(p: Promise<Remote>, ms: number): Promise<Remote> {
-  let late = false;
-  let timer: NodeJS.Timeout | undefined;
-  p.then((r) => (late ? r.close().catch(() => {}) : undefined), () => {});
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => ((late = true), reject(new RemoteError(`the site didn't answer within ${ms / 1000}s`, "network"))), ms);
-    timer.unref();
+/** `p`, or a rejection once `deadline` aborts first; a Remote that connects after that is closed. */
+function connectBy(p: Promise<Remote>, deadline: AbortSignal): Promise<Remote> {
+  p.then((r) => (deadline.aborted ? r.close().catch(() => {}) : undefined), () => {});
+  return new Promise<Remote>((resolve, reject) => {
+    if (deadline.aborted) return reject(deadline.reason);
+    const onAbort = () => reject(deadline.reason);
+    deadline.addEventListener("abort", onAbort, { once: true });
+    p.then(
+      (r) => (deadline.removeEventListener("abort", onAbort), resolve(r)),
+      (e: unknown) => (deadline.removeEventListener("abort", onAbort), reject(e)),
+    );
   });
-  return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
+}
+
+/** `remote` with every call bound by `deadline`: its signal, and a timeout of the time left. */
+function boundRemote(remote: Remote, deadline: AbortSignal, endsAt: number): Remote {
+  return {
+    call: (tool, args, opts) =>
+      remote.call(tool, args, {
+        signal: opts?.signal ? AbortSignal.any([opts.signal, deadline]) : deadline,
+        timeout: Math.max(1, Math.min(opts?.timeout ?? Infinity, endsAt - Date.now())),
+      }),
+    close: () => remote.close(),
+  };
 }
 
 const weekUrl = (link: RemoteLink): string => `${link.site}/repos/${encodeURIComponent(link.repoId)}/week`;
 
-/** Connects to the linked site with the stored sign-in, runs `fn`, and closes the connection. */
-async function withSite<T>(link: RemoteLink, deps: CliDeps, fn: (remote: Remote) => Promise<T>): Promise<T> {
-  if (!isSignedIn(link.site)) throw new RemoteError(`not signed in to ${link.site}: run repobrain login --site ${link.site}`, "auth");
-  const remote = await connectWithin((deps.connect ?? connectRemote)(link.site), SITE_TIMEOUT_MS);
+/**
+ * Connects to the linked site with the stored sign-in, runs `fn`, and closes the connection, all within one
+ * deadline ({@link INTERACTIVE_BUDGET_MS}). Records whether the site accepted the sign-in, and throws a
+ * RemoteError: a network one once the deadline passes.
+ */
+async function withSite<T>(key: string, link: RemoteLink, deps: CliDeps, fn: (remote: Remote) => Promise<T>): Promise<T> {
+  const budget = deps.siteBudgetMs ?? INTERACTIVE_BUDGET_MS;
+  const endsAt = Date.now() + budget;
+  const deadline = AbortSignal.timeout(budget);
   try {
-    return await fn(remote);
-  } finally {
-    await remote.close().catch(() => {});
+    if (!isSignedIn(link.site)) throw new RemoteError(`not signed in to ${link.site}: run repobrain login --site ${link.site}`, "auth");
+    const remote = await connectBy((deps.connect ?? connectRemote)(link.site), deadline);
+    try {
+      // Connecting sends the stored token, so the site has accepted the sign-in.
+      markAuth(key, false);
+      return await fn(boundRemote(remote, deadline, endsAt));
+    } finally {
+      await remote.close().catch(() => {});
+    }
+  } catch (e) {
+    const err = deadline.aborted ? new RemoteError(`the site didn't answer within ${Math.round(budget / 1000)}s`, "network") : toRemoteError(e);
+    if (err.kind === "auth") markAuth(key, true);
+    throw err;
   }
 }
 
-/** Uploads the cards the site doesn't have as they are now. Skipped while a capture holds the lock: it uploads them itself. */
-async function uploadPending(key: string, remote: Remote): Promise<void> {
+/**
+ * Uploads the cards the site doesn't have as they are now. Returns false, sending nothing, while a capture
+ * holds the lock: it uploads them itself.
+ */
+async function uploadPending(key: string, remote: Remote, signal?: AbortSignal): Promise<boolean> {
   const lock = acquireLock(key);
-  if (!lock) return;
+  if (!lock) return false;
   try {
-    await submitPending(key, remote, { signal: AbortSignal.timeout(SYNC_BUDGET_MS), refresh: lock.refresh });
+    await submitPending(key, remote, { signal, refresh: lock.refresh });
+    return true;
   } finally {
     lock.release();
   }
@@ -450,7 +495,7 @@ function checkCards(tool: string, v: unknown): SiteCard[] {
 
 /** The deck's due cards. A deck the site has locked is an error, not an empty list. */
 async function siteDue(remote: Remote, deckId: string): Promise<SiteCard[]> {
-  const res = await remote.call<unknown>("get_due_cards", { deckId }, timed);
+  const res = await remote.call<unknown>("get_due_cards", { deckId });
   if (isObj(res) && res.locked === true) throw new RemoteError(typeof res.message === "string" ? res.message : "the site has locked this deck", "tool");
   return checkCards("get_due_cards", res);
 }
@@ -466,7 +511,7 @@ async function findSiteCard(remote: Remote, deckId: string, id: string, by: "sit
   const due = (await siteDue(remote, deckId)).find(is);
   if (due) return due;
   for (let offset: number | null = 0, pages = 0; offset !== null && pages < 100; pages++) {
-    const res: unknown = await remote.call<unknown>("get_deck", { deckId, offset, limit: DECK_PAGE }, timed);
+    const res: unknown = await remote.call<unknown>("get_deck", { deckId, offset, limit: DECK_PAGE });
     const hit = checkCards("get_deck", res).find(is);
     if (hit) return hit;
     const next: unknown = isObj(res) ? res.nextOffset : null;
@@ -496,10 +541,19 @@ const siteBody = (b: CardBody): CardBody =>
     : { kind: "flashcard", front: b.front, back: b.back };
 
 async function curateOnSite(remote: Remote, key: string, id: string, decision: Decision, body?: CardBody): Promise<"kept" | "dropped"> {
-  const res = await remote.call<unknown>("curate_card", { repo: key, id, decision, ...(body ? { body: siteBody(body) } : {}) }, timed);
+  const res = await remote.call<unknown>("curate_card", { repo: key, id, decision, ...(body ? { body: siteBody(body) } : {}) });
   const curation = isObj(res) ? res.curation : undefined;
   if (curation !== "kept" && curation !== "dropped") throw new RemoteError("curate_card returned an unexpected result", "tool");
   return curation;
+}
+
+/** Why the site refused this card when it was uploaded, or null when it wasn't or the mark predates reasons. */
+function refusalReason(key: string, id: string): string | null {
+  try {
+    return refusalOf(readState(key), id)?.reason ?? null;
+  } catch {
+    return null;
+  }
 }
 
 /** Whether the site has been sent this card (a corrupt state.json counts as yes: the site then says if it hasn't). */
@@ -634,19 +688,20 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
       if (!link) return ok(local);
       let out: RemoteWeekOutput;
       try {
-        const week = await withSite(link, deps, async (remote) => {
-          // Connecting sends the stored token, so the site has accepted the sign-in.
-          markAuth(key, false);
-          await uploadPending(key, remote);
-          return checkWeek(await remote.call<unknown>("get_week", { repo: key }, timed));
+        let uploadError: string | undefined;
+        const week = await withSite(key, link, deps, async (remote) => {
+          // A failed upload still leaves the site's week to show; the cards are sent again next time.
+          await uploadPending(key, remote, AbortSignal.timeout(WEEK_UPLOAD_MS)).catch((e: unknown) => {
+            uploadError = toRemoteError(e).message;
+          });
+          return checkWeek(await remote.call<unknown>("get_week", { repo: key }));
         });
         // The site never sees this machine's card files or capture runs: those come from here.
         const { unreadable, claudeUnavailable, lastCaptureError, stateError } = local;
         out = { ...week, unreadable, claudeUnavailable, lastCaptureError, stateError, site: link.site, weekUrl: weekUrl(link), remote: true };
+        if (uploadError !== undefined) out.uploadError = uploadError;
       } catch (e) {
-        const err = toRemoteError(e);
-        if (err.kind === "auth") markAuth(key, true);
-        out = { ...local, site: link.site, weekUrl: weekUrl(link), remote: false, remoteError: err.message };
+        out = { ...local, site: link.site, weekUrl: weekUrl(link), remote: false, remoteError: message(e) };
       }
       if (authExpired(key)) out.loginHint = LOGIN_HINT;
       return ok(out);
@@ -682,15 +737,25 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
           write();
           return ok(out);
         }
-        const status = await withSite(link, deps, async (remote) => {
-          if (!wasSubmitted(key, id)) await uploadPending(key, remote);
-          const curation = await curateOnSite(remote, key, id, decision, decision === "fix" ? next.body : undefined);
+        return withSite(key, link, deps, async (remote) => {
+          if (!wasSubmitted(key, id)) {
+            if (!(await uploadPending(key, remote))) return fail("a capture is uploading cards; try again in a moment");
+            if (!wasSubmitted(key, id)) {
+              // Refused or held back when uploaded: the site has no copy to curate.
+              if (decision === "drop") {
+                write();
+                return ok({ ...out, site: "not on the site" } as CurateOutput);
+              }
+              const reason = refusalReason(key, id) ?? "no reason recorded";
+              return fail(`card ${id} isn't on the site: it was refused when uploaded (${reason}); edit it and run curate fix, or drop it`);
+            }
+          }
+          const status = await curateOnSite(remote, key, id, decision, decision === "fix" ? next.body : undefined);
           write();
           // The site takes a kept card's anchor from a resubmit; if this fails, the next capture or week sends it.
           if (out.reanchored) await uploadPending(key, remote).catch(() => {});
-          return curation;
+          return ok({ ...out, status } as CurateOutput);
         });
-        return ok({ ...out, status } as CurateOutput);
       };
       const found = lookupCard(key, id);
       if ("missing" in found) return noCard(id);
@@ -743,10 +808,11 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
       if (limit === null) return usage("--limit must be a positive integer");
       const { key, link } = connected(values.repo);
       if (link) {
-        const site = await withSite(link, deps, (remote) => siteDue(remote, link.deckId));
+        const site = await withSite(key, link, deps, (remote) => siteDue(remote, link.deckId));
         const out: RemoteDueOutput = {
-          // The anchor is the site's copy; the local card file, when there is one, gives the area.
-          due: site.slice(0, limit ?? 10).map((c) => {
+          // The anchor is the site's copy; the local card file, when there is one, gives the area. Cards whose
+          // code was removed aren't quizzed, as locally.
+          due: site.filter((c) => c.repoCard?.status !== "orphaned").slice(0, limit ?? 10).map((c) => {
             const l = localCard(key, c);
             const a = c.repoCard;
             return {
@@ -776,14 +842,15 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
       const found = lookupCard(key, id);
       if (link) {
         // The site schedules a linked repo's reviews, by its own card ids: a plugin card id is looked up first.
-        return withSite(link, deps, async (remote) => {
+        return withSite(key, link, deps, async (remote) => {
           let cardId = id;
           if (!("missing" in found)) {
             const site = await findSiteCard(remote, link.deckId, id, "plugin");
-            if (!site) return fail(`no card ${id} on the site`);
+            if (!site) return fail(`card ${id} isn't studied on the site: it may be a draft, dropped, or not uploaded yet`);
+            if (site.repoCard?.status === "orphaned") return fail(`the code for ${id} was removed; drop it, or re-point it with \`curate ${id} fix --path P --lines S-E\``);
             cardId = site.id;
           }
-          const res = await remote.call<unknown>("record_quiz_results", { deckId: link.deckId, outcomes: [{ cardId, correct: grade === "right" }] }, timed);
+          const res = await remote.call<unknown>("record_quiz_results", { deckId: link.deckId, outcomes: [{ cardId, correct: grade === "right" }] });
           if (!isObj(res) || typeof res.recorded !== "number" || !Array.isArray(res.skipped)) throw new RemoteError("record_quiz_results returned an unexpected result", "tool");
           // The site skips cards it doesn't study (unknown ids, drafts, dropped cards) without failing.
           if (res.recorded === 0 || res.skipped.length > 0) return fail(`card ${id} isn't studied on the site: it may be a draft or dropped`);
@@ -834,7 +901,7 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
       let localId: string | undefined;
       if ("missing" in found && link) {
         // A site id, from `due`: the code comes from the local card the site card came from.
-        const site = await withSite(link, deps, (remote) => findSiteCard(remote, link.deckId, id));
+        const site = await withSite(key, link, deps, (remote) => findSiteCard(remote, link.deckId, id));
         if (!site) return noCard(id);
         const match = localCard(key, site);
         if (!match) return fail(`card ${id} has no card file in this repository`);
@@ -871,7 +938,7 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
       const found = lookupCard(key, id);
       if ("missing" in found && link) {
         // A site id, from `due`: the answer is the site's copy of the card.
-        const site = await withSite(link, deps, (remote) => findSiteCard(remote, link.deckId, id));
+        const site = await withSite(key, link, deps, (remote) => findSiteCard(remote, link.deckId, id));
         if (!site) return noCard(id);
         if (!isMcq(site)) return ok({ id, kind: "flashcard", back: site.definition } satisfies AnswerOutput);
         const correct = (site.choices ?? []).indexOf(site.definition);

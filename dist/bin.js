@@ -26382,6 +26382,11 @@ function checkSubmitResult(v) {
   return r;
 }
 var outOfTime = () => new RemoteError("the site sync ran out of time", "network");
+function refusalOf(state, id) {
+  const mark = state.refused?.[id];
+  if (mark === void 0) return null;
+  return typeof mark === "string" ? { hash: mark, reason: null } : { hash: mark.hash, reason: mark.reason };
+}
 async function submitPending(key, remote, opts = {}) {
   const report = opts.report ?? { uploaded: 0, rejected: [] };
   const state = readState(key);
@@ -26391,10 +26396,10 @@ async function submitPending(key, remote, opts = {}) {
   let heldBack = false;
   for (const card of listCards(key)) {
     const hash = cardHash(card);
-    if (submitted[card.id] === hash || refused[card.id] === hash) continue;
+    if (submitted[card.id] === hash || refusalOf(state, card.id)?.hash === hash) continue;
     const why = unsendable(card);
     if (why) {
-      refused[card.id] = hash;
+      refused[card.id] = { hash, reason: why };
       report.rejected.push({ id: card.id, reason: why });
       heldBack = true;
       continue;
@@ -26427,7 +26432,7 @@ async function submitPending(key, remote, opts = {}) {
       for (const r of result.rejected) {
         const hash = sent.get(r.id);
         if (hash === void 0) continue;
-        refused[r.id] = hash;
+        refused[r.id] = { hash, reason: r.reason };
         report.rejected.push(r);
       }
       writeState(key, state);
@@ -28795,37 +28800,59 @@ function locate(repoPath, a, head) {
   }
   return { content, startLine: a.startLine + shift, endLine: a.endLine + shift, symbolMissing };
 }
-var SITE_TIMEOUT_MS = 3e4;
-var timed = { timeout: SITE_TIMEOUT_MS };
+var INTERACTIVE_BUDGET_MS = 45e3;
+var WEEK_UPLOAD_MS = 15e3;
 var LOGIN_HINT = "the site refused this machine's sign-in, or it expired: run repobrain login";
-function connectWithin(p, ms) {
-  let late = false;
-  let timer;
-  p.then((r) => late ? r.close().catch(() => {
+function connectBy(p, deadline) {
+  p.then((r) => deadline.aborted ? r.close().catch(() => {
   }) : void 0, () => {
   });
-  const timeout = new Promise((_, reject) => {
-    timer = setTimeout(() => (late = true, reject(new RemoteError(`the site didn't answer within ${ms / 1e3}s`, "network"))), ms);
-    timer.unref();
+  return new Promise((resolve, reject) => {
+    if (deadline.aborted) return reject(deadline.reason);
+    const onAbort = () => reject(deadline.reason);
+    deadline.addEventListener("abort", onAbort, { once: true });
+    p.then(
+      (r) => (deadline.removeEventListener("abort", onAbort), resolve(r)),
+      (e) => (deadline.removeEventListener("abort", onAbort), reject(e))
+    );
   });
-  return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
+}
+function boundRemote(remote, deadline, endsAt) {
+  return {
+    call: (tool, args, opts) => remote.call(tool, args, {
+      signal: opts?.signal ? AbortSignal.any([opts.signal, deadline]) : deadline,
+      timeout: Math.max(1, Math.min(opts?.timeout ?? Infinity, endsAt - Date.now()))
+    }),
+    close: () => remote.close()
+  };
 }
 var weekUrl = (link) => `${link.site}/repos/${encodeURIComponent(link.repoId)}/week`;
-async function withSite(link, deps, fn) {
-  if (!isSignedIn(link.site)) throw new RemoteError(`not signed in to ${link.site}: run repobrain login --site ${link.site}`, "auth");
-  const remote = await connectWithin((deps.connect ?? connectRemote)(link.site), SITE_TIMEOUT_MS);
+async function withSite(key, link, deps, fn) {
+  const budget2 = deps.siteBudgetMs ?? INTERACTIVE_BUDGET_MS;
+  const endsAt = Date.now() + budget2;
+  const deadline = AbortSignal.timeout(budget2);
   try {
-    return await fn(remote);
-  } finally {
-    await remote.close().catch(() => {
-    });
+    if (!isSignedIn(link.site)) throw new RemoteError(`not signed in to ${link.site}: run repobrain login --site ${link.site}`, "auth");
+    const remote = await connectBy((deps.connect ?? connectRemote)(link.site), deadline);
+    try {
+      markAuth(key, false);
+      return await fn(boundRemote(remote, deadline, endsAt));
+    } finally {
+      await remote.close().catch(() => {
+      });
+    }
+  } catch (e) {
+    const err = deadline.aborted ? new RemoteError(`the site didn't answer within ${Math.round(budget2 / 1e3)}s`, "network") : toRemoteError(e);
+    if (err.kind === "auth") markAuth(key, true);
+    throw err;
   }
 }
-async function uploadPending(key, remote) {
+async function uploadPending(key, remote, signal) {
   const lock = acquireLock(key);
-  if (!lock) return;
+  if (!lock) return false;
   try {
-    await submitPending(key, remote, { signal: AbortSignal.timeout(SYNC_BUDGET_MS), refresh: lock.refresh });
+    await submitPending(key, remote, { signal, refresh: lock.refresh });
+    return true;
   } finally {
     lock.release();
   }
@@ -28857,7 +28884,7 @@ function checkCards(tool, v) {
   return cards;
 }
 async function siteDue(remote, deckId) {
-  const res = await remote.call("get_due_cards", { deckId }, timed);
+  const res = await remote.call("get_due_cards", { deckId });
   if (isObj(res) && res.locked === true) throw new RemoteError(typeof res.message === "string" ? res.message : "the site has locked this deck", "tool");
   return checkCards("get_due_cards", res);
 }
@@ -28867,7 +28894,7 @@ async function findSiteCard(remote, deckId, id, by = "site") {
   const due = (await siteDue(remote, deckId)).find(is);
   if (due) return due;
   for (let offset = 0, pages = 0; offset !== null && pages < 100; pages++) {
-    const res = await remote.call("get_deck", { deckId, offset, limit: DECK_PAGE }, timed);
+    const res = await remote.call("get_deck", { deckId, offset, limit: DECK_PAGE });
     const hit = checkCards("get_deck", res).find(is);
     if (hit) return hit;
     const next = isObj(res) ? res.nextOffset : null;
@@ -28885,10 +28912,17 @@ function localCard(key, c) {
 }
 var siteBody = (b) => b.kind === "mcq" ? { kind: "mcq", question: b.question, choices: b.choices, correctChoice: b.correctChoice, explanation: b.explanation } : { kind: "flashcard", front: b.front, back: b.back };
 async function curateOnSite(remote, key, id, decision, body) {
-  const res = await remote.call("curate_card", { repo: key, id, decision, ...body ? { body: siteBody(body) } : {} }, timed);
+  const res = await remote.call("curate_card", { repo: key, id, decision, ...body ? { body: siteBody(body) } : {} });
   const curation = isObj(res) ? res.curation : void 0;
   if (curation !== "kept" && curation !== "dropped") throw new RemoteError("curate_card returned an unexpected result", "tool");
   return curation;
+}
+function refusalReason(key, id) {
+  try {
+    return refusalOf(readState(key), id)?.reason ?? null;
+  } catch {
+    return null;
+  }
 }
 function wasSubmitted(key, id) {
   try {
@@ -29028,17 +29062,18 @@ ${USAGE}`);
       if (!link) return ok(local);
       let out;
       try {
-        const week = await withSite(link, deps, async (remote) => {
-          markAuth(key, false);
-          await uploadPending(key, remote);
-          return checkWeek(await remote.call("get_week", { repo: key }, timed));
+        let uploadError;
+        const week = await withSite(key, link, deps, async (remote) => {
+          await uploadPending(key, remote, AbortSignal.timeout(WEEK_UPLOAD_MS)).catch((e) => {
+            uploadError = toRemoteError(e).message;
+          });
+          return checkWeek(await remote.call("get_week", { repo: key }));
         });
         const { unreadable, claudeUnavailable, lastCaptureError, stateError } = local;
         out = { ...week, unreadable, claudeUnavailable, lastCaptureError, stateError, site: link.site, weekUrl: weekUrl(link), remote: true };
+        if (uploadError !== void 0) out.uploadError = uploadError;
       } catch (e) {
-        const err = toRemoteError(e);
-        if (err.kind === "auth") markAuth(key, true);
-        out = { ...local, site: link.site, weekUrl: weekUrl(link), remote: false, remoteError: err.message };
+        out = { ...local, site: link.site, weekUrl: weekUrl(link), remote: false, remoteError: message4(e) };
       }
       if (authExpired(key)) out.loginHint = LOGIN_HINT;
       return ok(out);
@@ -29069,15 +29104,24 @@ ${USAGE}`);
           write();
           return ok(out2);
         }
-        const status = await withSite(link, deps, async (remote) => {
-          if (!wasSubmitted(key, id)) await uploadPending(key, remote);
-          const curation = await curateOnSite(remote, key, id, decision, decision === "fix" ? next.body : void 0);
+        return withSite(key, link, deps, async (remote) => {
+          if (!wasSubmitted(key, id)) {
+            if (!await uploadPending(key, remote)) return fail("a capture is uploading cards; try again in a moment");
+            if (!wasSubmitted(key, id)) {
+              if (decision === "drop") {
+                write();
+                return ok({ ...out2, site: "not on the site" });
+              }
+              const reason = refusalReason(key, id) ?? "no reason recorded";
+              return fail(`card ${id} isn't on the site: it was refused when uploaded (${reason}); edit it and run curate fix, or drop it`);
+            }
+          }
+          const status = await curateOnSite(remote, key, id, decision, decision === "fix" ? next.body : void 0);
           write();
           if (out2.reanchored) await uploadPending(key, remote).catch(() => {
           });
-          return curation;
+          return ok({ ...out2, status });
         });
-        return ok({ ...out2, status });
       };
       const found = lookupCard(key, id);
       if ("missing" in found) return noCard(id);
@@ -29131,10 +29175,11 @@ ${USAGE}`);
       if (limit === null) return usage("--limit must be a positive integer");
       const { key, link } = connected(values.repo);
       if (link) {
-        const site = await withSite(link, deps, (remote) => siteDue(remote, link.deckId));
+        const site = await withSite(key, link, deps, (remote) => siteDue(remote, link.deckId));
         const out2 = {
-          // The anchor is the site's copy; the local card file, when there is one, gives the area.
-          due: site.slice(0, limit ?? 10).map((c) => {
+          // The anchor is the site's copy; the local card file, when there is one, gives the area. Cards whose
+          // code was removed aren't quizzed, as locally.
+          due: site.filter((c) => c.repoCard?.status !== "orphaned").slice(0, limit ?? 10).map((c) => {
             const l = localCard(key, c);
             const a = c.repoCard;
             return {
@@ -29174,14 +29219,15 @@ ${USAGE}`);
       const { key, link } = connected(values.repo);
       const found = lookupCard(key, id);
       if (link) {
-        return withSite(link, deps, async (remote) => {
+        return withSite(key, link, deps, async (remote) => {
           let cardId = id;
           if (!("missing" in found)) {
             const site = await findSiteCard(remote, link.deckId, id, "plugin");
-            if (!site) return fail(`no card ${id} on the site`);
+            if (!site) return fail(`card ${id} isn't studied on the site: it may be a draft, dropped, or not uploaded yet`);
+            if (site.repoCard?.status === "orphaned") return fail(`the code for ${id} was removed; drop it, or re-point it with \`curate ${id} fix --path P --lines S-E\``);
             cardId = site.id;
           }
-          const res = await remote.call("record_quiz_results", { deckId: link.deckId, outcomes: [{ cardId, correct: grade === "right" }] }, timed);
+          const res = await remote.call("record_quiz_results", { deckId: link.deckId, outcomes: [{ cardId, correct: grade === "right" }] });
           if (!isObj(res) || typeof res.recorded !== "number" || !Array.isArray(res.skipped)) throw new RemoteError("record_quiz_results returned an unexpected result", "tool");
           if (res.recorded === 0 || res.skipped.length > 0) return fail(`card ${id} isn't studied on the site: it may be a draft or dropped`);
           return ok({ id, recorded: true, site: link.site, remote: true });
@@ -29236,7 +29282,7 @@ ${USAGE}`);
       let found = lookupCard(key, id);
       let localId;
       if ("missing" in found && link) {
-        const site = await withSite(link, deps, (remote) => findSiteCard(remote, link.deckId, id));
+        const site = await withSite(key, link, deps, (remote) => findSiteCard(remote, link.deckId, id));
         if (!site) return noCard(id);
         const match = localCard(key, site);
         if (!match) return fail(`card ${id} has no card file in this repository`);
@@ -29278,7 +29324,7 @@ ${USAGE}`);
       const { key, link } = connected(values.repo);
       const found = lookupCard(key, id);
       if ("missing" in found && link) {
-        const site = await withSite(link, deps, (remote) => findSiteCard(remote, link.deckId, id));
+        const site = await withSite(key, link, deps, (remote) => findSiteCard(remote, link.deckId, id));
         if (!site) return noCard(id);
         if (!isMcq(site)) return ok({ id, kind: "flashcard", back: site.definition });
         const correct = (site.choices ?? []).indexOf(site.definition);
