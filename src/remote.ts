@@ -58,18 +58,19 @@ function isNetworkFailure(e: unknown): boolean {
  * a failure to reach the site get `fallback`: "auth" while connecting or signing in, where they come from the
  * OAuth flow, and "tool" for a tool call.
  */
-export function toRemoteError(e: unknown, fallback: "auth" | "tool" = "tool"): RemoteError {
+export function toRemoteError(e: unknown, fallback: "auth" | "tool" = "tool", site?: string): RemoteError {
   if (e instanceof RemoteError) return e;
+  const login = site ? `repobrain login --site ${site}` : "repobrain login";
   if (e instanceof UnauthorizedError || e instanceof OAuthError || e instanceof OAuthClientFlowError) {
     const m = messageOf(e);
-    return new RemoteError(m.includes("repobrain login") ? m : `not signed in to the site, or the sign-in expired: run repobrain login (${m})`, "auth");
+    return new RemoteError(m.includes("repobrain login") ? m : `not signed in to the site, or the sign-in expired: run ${login} (${m})`, "auth");
   }
   if (e instanceof SdkHttpError && (e.status === 401 || e.status === 403)) {
-    return new RemoteError(`the site refused the sign-in: run repobrain login (${messageOf(e)})`, "auth");
+    return new RemoteError(`the site refused the sign-in: run ${login} (${messageOf(e)})`, "auth");
   }
   if (e instanceof ProtocolError) return new RemoteError(messageOf(e), "tool");
   if (isNetworkFailure(e)) return new RemoteError(`could not reach the site: ${messageOf(e)}`, "network");
-  if (fallback === "auth") return new RemoteError(`sign-in failed: ${messageOf(e)}; run repobrain login`, "auth");
+  if (fallback === "auth") return new RemoteError(`sign-in failed: ${messageOf(e)}; run ${login}`, "auth");
   return new RemoteError(messageOf(e), "tool");
 }
 
@@ -97,7 +98,7 @@ export async function connectRemote(
     await client.connect(transport);
   } catch (e) {
     await client.close().catch(() => {});
-    throw toRemoteError(e, "auth");
+    throw toRemoteError(e, "auth", site);
   }
   return {
     async call<T>(tool: string, args: Record<string, unknown>, opts?: CallOptions): Promise<T> {
@@ -105,7 +106,7 @@ export async function connectRemote(
       try {
         result = await client.callTool({ name: tool, arguments: args }, opts);
       } catch (e) {
-        throw toRemoteError(e);
+        throw toRemoteError(e, "tool", site);
       }
       const text = firstText(result);
       if (result.isError) throw new RemoteError(text ?? `${tool} failed`, "tool");

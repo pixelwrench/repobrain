@@ -98,7 +98,7 @@ Your source files and diffs are never sent. Card text, written by your Claude, c
 
 **Stopping.** `repobrain unlink` stops syncing the repository; the site keeps its copy of the cards. `repobrain logout` forgets the sign-in on this machine.
 
-**Which site.** `--site`, else `REPOBRAIN_SITE`, else `https://repobrain.com`. Until the site is deployed, pass `--site http://localhost:3000` to `login` and `link` to use a local copy. Plain `http` is accepted only for `localhost`, `127.0.0.1` and `[::1]`.
+**Which site.** `--site`, else (for `login` and `logout` inside a linked repository) the site it is linked to, else `REPOBRAIN_SITE`, else `https://repobrain.com`. Until the site is deployed, pass `--site http://localhost:3000` to `login` and `link` to use a local copy. Plain `http` is accepted only for `localhost`, `127.0.0.1` and `[::1]`.
 
 ## Options
 
@@ -144,8 +144,8 @@ The plugin puts the `repobrain` CLI on the PATH of Claude Code's Bash tool. Outs
 | `baseline draft <area-id>\|--next` | Drafts one area's cards: a named planned or failed area, or the first planned one. |
 | `baseline status` | Shows the plan, each area's status, totals and the total known cost. |
 | `baseline skip <area-id>`, `baseline unskip <area-id>` | Skips a planned or failed area, or puts a skipped one back. |
-| `login [--site URL]` | Signs in to the RepoBrain site in your browser (OAuth with PKCE, redirecting back to a one-off listener on 127.0.0.1), and stores the tokens in `auth.json`. Waits up to 5 minutes. Tokens are never printed. |
-| `logout [--site URL]` | Forgets that site's sign-in. Other sites are kept. |
+| `login [--site URL]` | Signs in to the RepoBrain site in your browser (OAuth with PKCE, redirecting back to a one-off listener on 127.0.0.1), and stores the tokens in `auth.json`. Inside a linked repository it signs in to that repository's site unless `--site` is given. Waits up to 5 minutes. Tokens are never printed. |
+| `logout [--site URL]` | Forgets that site's sign-in (inside a linked repository, its site unless `--site` is given). Other sites are kept. |
 | `link [--site URL]` | Links the repository to the site and uploads all its cards. Needs `login` first. Linking again, or to another site, uploads them all again. |
 | `unlink` | Stops syncing the repository. The site keeps its copy of the cards. |
 

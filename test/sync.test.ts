@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
-import { FileOAuthProvider } from "../src/auth.js";
+import { FileOAuthProvider, isSignedIn } from "../src/auth.js";
 import { main } from "../src/cli.js";
 import type { Card } from "../src/format.js";
 import { RemoteError, type Remote } from "../src/remote.js";
@@ -200,6 +200,30 @@ describe("link and submitPending", () => {
     it("names repobrain login when the site has no sign-in", async () => {
       const out = await cli(["link", "--site", SITE]);
       expect(out).toEqual({ code: 1, out: { error: `not signed in to ${SITE}: run repobrain login --site ${SITE}` } });
+    });
+
+    it("logs out of the linked site by default, and of --site when given", async () => {
+      setRemote(key, { site: SITE, repoId: "repo-1", deckId: "deck-1", linkedAt: "2026-11-01T09:00:00.000Z" });
+      new FileOAuthProvider(SITE).saveTokens({ access_token: "at-" + "x", token_type: "bearer" });
+      const saved = process.env.REPOBRAIN_SITE;
+      process.env.REPOBRAIN_SITE = "http://127.0.0.1:4999";
+      try {
+        expect(await cli(["logout", "--site", "http://127.0.0.1:4999"])).toEqual({ code: 0, out: { site: "http://127.0.0.1:4999", signedIn: false } });
+        expect(isSignedIn(SITE)).toBe(true);
+        expect(await cli(["logout"])).toEqual({ code: 0, out: { site: SITE, signedIn: false } });
+        expect(isSignedIn(SITE)).toBe(false);
+      } finally {
+        if (saved === undefined) delete process.env.REPOBRAIN_SITE;
+        else process.env.REPOBRAIN_SITE = saved;
+      }
+    });
+
+    it("names the linked site in capture.log when the site refuses the sign-in", async () => {
+      setRemote(key, { site: SITE, repoId: "repo-1", deckId: "deck-1", linkedAt: "2026-11-01T09:00:00.000Z" });
+      new FileOAuthProvider(SITE).saveTokens({ access_token: "at-" + "x", token_type: "bearer" });
+      appendLog(key, "start");
+      await syncToSite(key, { connect: async () => { throw new RemoteError("refused", "auth"); } });
+      expect(fs.readFileSync(path.join(repoDir(key), "capture.log"), "utf8")).toContain(`run repobrain login --site ${SITE}`);
     });
 
     it("names repobrain connect when the repo isn't connected", async () => {

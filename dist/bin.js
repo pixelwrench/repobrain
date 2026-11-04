@@ -24946,7 +24946,7 @@ var StreamableHTTPClientTransport = class {
 };
 
 // src/version.ts
-var VERSION = "0.4.0";
+var VERSION = "0.4.1";
 
 // src/remote.ts
 var RemoteError = class extends Error {
@@ -24983,18 +24983,19 @@ function isNetworkFailure(e) {
   const code = e.cause?.code;
   return e instanceof TypeError && typeof code === "string" && NETWORK_CODES.has(code);
 }
-function toRemoteError(e, fallback = "tool") {
+function toRemoteError(e, fallback = "tool", site) {
   if (e instanceof RemoteError) return e;
+  const login2 = site ? `repobrain login --site ${site}` : "repobrain login";
   if (e instanceof UnauthorizedError || e instanceof OAuthError || e instanceof OAuthClientFlowError) {
     const m = messageOf(e);
-    return new RemoteError(m.includes("repobrain login") ? m : `not signed in to the site, or the sign-in expired: run repobrain login (${m})`, "auth");
+    return new RemoteError(m.includes("repobrain login") ? m : `not signed in to the site, or the sign-in expired: run ${login2} (${m})`, "auth");
   }
   if (e instanceof SdkHttpError && (e.status === 401 || e.status === 403)) {
-    return new RemoteError(`the site refused the sign-in: run repobrain login (${messageOf(e)})`, "auth");
+    return new RemoteError(`the site refused the sign-in: run ${login2} (${messageOf(e)})`, "auth");
   }
   if (e instanceof ProtocolError) return new RemoteError(messageOf(e), "tool");
   if (isNetworkFailure(e)) return new RemoteError(`could not reach the site: ${messageOf(e)}`, "network");
-  if (fallback === "auth") return new RemoteError(`sign-in failed: ${messageOf(e)}; run repobrain login`, "auth");
+  if (fallback === "auth") return new RemoteError(`sign-in failed: ${messageOf(e)}; run ${login2}`, "auth");
   return new RemoteError(messageOf(e), "tool");
 }
 function firstText(result) {
@@ -25013,7 +25014,7 @@ async function connectRemote(site, deps = {}) {
   } catch (e) {
     await client.close().catch(() => {
     });
-    throw toRemoteError(e, "auth");
+    throw toRemoteError(e, "auth", site);
   }
   return {
     async call(tool, args, opts) {
@@ -25021,7 +25022,7 @@ async function connectRemote(site, deps = {}) {
       try {
         result = await client.callTool({ name: tool, arguments: args }, opts);
       } catch (e) {
-        throw toRemoteError(e);
+        throw toRemoteError(e, "tool", site);
       }
       const text = firstText(result);
       if (result.isError) throw new RemoteError(text ?? `${tool} failed`, "tool");
@@ -25683,7 +25684,7 @@ async function openInBrowser(url2, spawnFn = spawn) {
 async function login(site, deps = {}) {
   const flow = deps.authFlow ?? auth;
   const authFlow = (provider2, options) => flow(provider2, options).catch((e) => {
-    throw toRemoteError(e, "auth");
+    throw toRemoteError(e, "auth", site);
   });
   const openBrowser = deps.openBrowser ?? openInBrowser;
   const notify = deps.notify ?? ((m) => process.stderr.write(m + "\n"));
@@ -26469,9 +26470,9 @@ function unlinkRepo(key) {
 }
 var ANCHOR_BATCH = 2e3;
 var SYNC_BUDGET_MS = 9e4;
-function failureLine(kind, step, timedOut) {
+function failureLine(kind, step, timedOut, site) {
   if (timedOut) return `site sync failed (network): timed out during ${step}`;
-  if (kind === "auth") return `site sync failed (auth): the site refused the sign-in or it expired; run repobrain login`;
+  if (kind === "auth") return `site sync failed (auth): the site refused the sign-in or it expired; run repobrain login${site ? ` --site ${site}` : ""}`;
   if (kind === "network") return `site sync failed (network): could not reach the site during ${step}`;
   return `site sync failed (tool): ${step} failed`;
 }
@@ -26518,8 +26519,10 @@ async function syncToSite(key, opts = {}) {
   timer.unref();
   const signal = budget2.signal;
   let step = "connect";
+  let site;
   try {
     const link = loadConfig().repos[key]?.remote;
+    site = link?.site;
     if (!link) return 0;
     if (!isSignedIn(link.site)) throw new RemoteError("not signed in", "auth");
     const remote = await untilAborted((opts.connect ?? connectRemote)(link.site), signal);
@@ -26541,7 +26544,7 @@ async function syncToSite(key, opts = {}) {
   } catch (e) {
     const kind = e instanceof RemoteError ? e.kind : "tool";
     try {
-      appendLog(key, failureLine(kind, step, signal.aborted) + (report.uploaded ? ` (${report.uploaded} cards uploaded first)` : ""));
+      appendLog(key, failureLine(kind, step, signal.aborted, site) + (report.uploaded ? ` (${report.uploaded} cards uploaded first)` : ""));
       if (kind === "auth" && !signal.aborted) setRemoteAuth(key, true);
     } catch {
     }
@@ -28734,6 +28737,9 @@ function connected(repo) {
   if (!found) throw new Error(`${dir} is not connected to RepoBrain; run \`repobrain connect\` there first`);
   return { key: found.key, repoPath: found.config.path, areaDepth: found.config.areaDepth, link: found.config.remote };
 }
+function linkedSite(repo) {
+  return findRepo(path10.resolve(repo ?? process.cwd()))?.config.remote?.site;
+}
 function repoRelativePath(p) {
   if (!p || p.includes("\\") || p.includes("\0") || path10.posix.isAbsolute(p)) return null;
   if (p.split("/").includes("..")) return null;
@@ -28842,7 +28848,7 @@ async function withSite(key, link, deps, fn) {
       });
     }
   } catch (e) {
-    const err = deadline.aborted ? new RemoteError(`the site didn't answer within ${Math.round(budget2 / 1e3)}s`, "network") : toRemoteError(e);
+    const err = deadline.aborted ? new RemoteError(`the site didn't answer within ${Math.round(budget2 / 1e3)}s`, "network") : toRemoteError(e, "tool", link.site);
     if (err.kind === "auth") markAuth(key, true);
     throw err;
   }
@@ -29002,7 +29008,7 @@ ${USAGE}`);
 ${USAGE}`);
       let site;
       try {
-        site = resolveSite(values.site);
+        site = resolveSite(values.site ?? linkedSite(values.repo));
       } catch (e) {
         return usage(message4(e));
       }
@@ -29065,7 +29071,7 @@ ${USAGE}`);
         let uploadError;
         const week = await withSite(key, link, deps, async (remote) => {
           await uploadPending(key, remote, AbortSignal.timeout(WEEK_UPLOAD_MS)).catch((e) => {
-            uploadError = toRemoteError(e).message;
+            uploadError = toRemoteError(e, "tool", link.site).message;
           });
           return checkWeek(await remote.call("get_week", { repo: key }));
         });

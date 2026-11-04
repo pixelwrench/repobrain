@@ -292,9 +292,9 @@ export interface SiteSyncOptions {
 }
 
 /** What capture.log says about a failure: its kind and a fixed message, never the error's text, tokens or card text. */
-function failureLine(kind: string, step: string, timedOut: boolean): string {
+function failureLine(kind: string, step: string, timedOut: boolean, site: string | undefined): string {
   if (timedOut) return `site sync failed (network): timed out during ${step}`;
-  if (kind === "auth") return `site sync failed (auth): the site refused the sign-in or it expired; run repobrain login`;
+  if (kind === "auth") return `site sync failed (auth): the site refused the sign-in or it expired; run repobrain login${site ? ` --site ${site}` : ""}`;
   if (kind === "network") return `site sync failed (network): could not reach the site during ${step}`;
   return `site sync failed (tool): ${step} failed`;
 }
@@ -355,8 +355,10 @@ export async function syncToSite(key: string, opts: SiteSyncOptions = {}): Promi
   timer.unref();
   const signal = budget.signal;
   let step = "connect";
+  let site: string | undefined;
   try {
     const link = loadConfig().repos[key]?.remote;
+    site = link?.site;
     if (!link) return 0;
     if (!isSignedIn(link.site)) throw new RemoteError("not signed in", "auth");
     const remote = await untilAborted((opts.connect ?? connectRemote)(link.site), signal);
@@ -378,7 +380,7 @@ export async function syncToSite(key: string, opts: SiteSyncOptions = {}): Promi
   } catch (e) {
     const kind = e instanceof RemoteError ? e.kind : "tool";
     try {
-      appendLog(key, failureLine(kind, step, signal.aborted) + (report.uploaded ? ` (${report.uploaded} cards uploaded first)` : ""));
+      appendLog(key, failureLine(kind, step, signal.aborted, site) + (report.uploaded ? ` (${report.uploaded} cards uploaded first)` : ""));
       if (kind === "auth" && !signal.aborted) setRemoteAuth(key, true);
     } catch {
       // An unwritable state or log: the capture itself still stands.

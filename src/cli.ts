@@ -274,6 +274,11 @@ function connected(repo: string | undefined): { key: string; repoPath: string; a
   return { key: found.key, repoPath: found.config.path, areaDepth: found.config.areaDepth, link: found.config.remote };
 }
 
+/** The site the repo at `repo` (or the working directory) is linked to, if it is connected and linked. */
+function linkedSite(repo: string | undefined): string | undefined {
+  return findRepo(path.resolve(repo ?? process.cwd()))?.config.remote?.site;
+}
+
 /** A relative path inside the repo with no `..`, normalised; null when unsafe. */
 function repoRelativePath(p: string): string | null {
   if (!p || p.includes("\\") || p.includes("\0") || path.posix.isAbsolute(p)) return null;
@@ -375,7 +380,7 @@ function locate(repoPath: string, a: Anchor, head: string) {
 export const INTERACTIVE_BUDGET_MS = 45_000;
 /** How long week's upload may take, so get_week still has time once the upload gives up. */
 const WEEK_UPLOAD_MS = 15_000;
-/** Names the linked site: without --site, login would sign in to REPOBRAIN_SITE or the default site instead. */
+/** Names the linked site, so the hint also works when run outside the repo. */
 const loginHint = (site: string): string => `the site refused this machine's sign-in, or it expired: run repobrain login --site ${site}`;
 
 /**
@@ -440,7 +445,7 @@ async function withSite<T>(key: string, link: RemoteLink, deps: CliDeps, fn: (re
       await remote.close().catch(() => {});
     }
   } catch (e) {
-    const err = deadline.aborted ? new RemoteError(`the site didn't answer within ${Math.round(budget / 1000)}s`, "network") : toRemoteError(e);
+    const err = deadline.aborted ? new RemoteError(`the site didn't answer within ${Math.round(budget / 1000)}s`, "network") : toRemoteError(e, "tool", link.site);
     if (err.kind === "auth") markAuth(key, true);
     throw err;
   }
@@ -632,7 +637,8 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
       if (positionals.length > 0) return usage(`unexpected argument ${JSON.stringify(positionals[0])}\n${USAGE}`);
       let site: string;
       try {
-        site = resolveSite(values.site);
+        // Inside a linked repo (or with --repo naming one), the linked site unless --site says otherwise.
+        site = resolveSite(values.site ?? linkedSite(values.repo));
       } catch (e) {
         return usage(message(e));
       }
@@ -693,7 +699,7 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<CliResult> {
         const week = await withSite(key, link, deps, async (remote) => {
           // A failed upload still leaves the site's week to show; the cards are sent again next time.
           await uploadPending(key, remote, AbortSignal.timeout(WEEK_UPLOAD_MS)).catch((e: unknown) => {
-            uploadError = toRemoteError(e).message;
+            uploadError = toRemoteError(e, "tool", link.site).message;
           });
           return checkWeek(await remote.call<unknown>("get_week", { repo: key }));
         });

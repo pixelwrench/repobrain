@@ -114,6 +114,7 @@ describe("toRemoteError", () => {
     expect(toRemoteError(new Error("Either provider.prepareTokenRequest() or authorizationCode is required")).kind).toBe("tool");
     expect(toRemoteError(new Error("odd"), "auth").kind).toBe("auth");
     expect(toRemoteError(new TypeError("x is not a function")).kind).toBe("tool");
+    expect(toRemoteError(new UnauthorizedError(), "tool", "http://localhost:3000").message).toContain("run repobrain login --site http://localhost:3000");
     expect(toRemoteError(new SdkHttpError(SdkErrorCode.ClientHttpNotImplemented, "404", { status: 404 })).kind).toBe("tool");
   });
 

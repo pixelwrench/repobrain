@@ -421,7 +421,7 @@ export async function login(site: string, deps: LoginDeps = {}): Promise<LoginOu
   const flow = deps.authFlow ?? auth;
   // Discovery, registration and the token exchange fail as auth or network errors with a readable message.
   const authFlow: AuthFlow = (provider, options) => flow(provider, options).catch((e: unknown) => {
-    throw toRemoteError(e, "auth");
+    throw toRemoteError(e, "auth", site);
   });
   const openBrowser = deps.openBrowser ?? openInBrowser;
   const notify = deps.notify ?? ((m: string) => process.stderr.write(m + "\n"));
